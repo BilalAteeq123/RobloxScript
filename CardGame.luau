@@ -17,7 +17,7 @@ local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
 local DIAGNOSTIC_KEY = Enum.KeyCode.Q
 local MERCHANT_TELEPORT_KEY = Enum.KeyCode.T
-local TOKEN_TELEPORT_KEY = Enum.KeyCode.E
+local TOKEN_TELEPORT_KEY = Enum.KeyCode.V
 
 local COORD_TOGGLE_KEY = Enum.KeyCode.R -- toggle HUD
 local COORD_PRINT_KEY = Enum.KeyCode.F -- print coords once
