@@ -22,6 +22,7 @@ local TOKEN_TELEPORT_KEY = Enum.KeyCode.V
 local COORD_TOGGLE_KEY = Enum.KeyCode.R -- toggle HUD
 local COORD_PRINT_KEY = Enum.KeyCode.F -- print coords once
 local TOKEN_PART_SCAN_KEY = Enum.KeyCode.G -- scan token parts near you and print
+local MERCHANT_SCAN_KEY = Enum.KeyCode.Y -- scan travelling merchant inventory
 
 local TELEPORT_OFFSET = Vector3.new(8, 2, 8) -- used for merchant, not tokens
 local TOKEN_EXTRA_Y = 0.5 -- small safety lift after placing on the top surface
@@ -1037,6 +1038,86 @@ task.spawn(function()
 	end
 end)
 
+local function scanTravellingMerchantInventory()
+	local merchant = findTravellingMerchant()
+	if not merchant then
+		print("[MERCHANT SCAN] No travelling merchant found.")
+		return
+	end
+
+	print("========== [TRAVELLING MERCHANT INVENTORY SCAN] ==========")
+	print("Merchant model:", merchant:GetFullName())
+
+	local foundItems = {}
+	local seen = {}
+
+	local function registerItem(name, obj)
+		if not seen[name] then
+			seen[name] = true
+			table.insert(foundItems, {
+				name = name,
+				path = obj:GetFullName(),
+				class = obj.ClassName
+			})
+		end
+	end
+
+	for _, d in ipairs(merchant:GetDescendants()) do
+		-- Tools sold directly
+		if d:IsA("Tool") then
+			registerItem(d.Name, d)
+
+		-- GUI buttons (shops often use these)
+		elseif d:IsA("TextButton") or d:IsA("ImageButton") then
+			local label = d.Text or d.Name
+			if label ~= "" then
+				registerItem(label, d)
+			end
+
+		-- Proximity / click based purchase systems
+		elseif d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
+			local parent = d.Parent
+			if parent then
+				registerItem(parent.Name, parent)
+			end
+
+		-- Models or parts with price/cost indicators
+		elseif d:IsA("Model") or d:IsA("BasePart") then
+			for _, v in ipairs(d:GetDescendants()) do
+				if v:IsA("IntValue") or v:IsA("NumberValue") then
+					local n = string.lower(v.Name)
+					if
+						n:find("price", 1, true)
+						or n:find("cost", 1, true)
+						or n:find("buy", 1, true)
+						or n:find("sell", 1, true)
+					then
+						registerItem(d.Name, d)
+						break
+					end
+				end
+			end
+		end
+	end
+
+	if #foundItems == 0 then
+		print("[MERCHANT SCAN] No sellable items detected.")
+	else
+		print("[MERCHANT SCAN] Found " .. #foundItems .. " item(s):")
+		for i, item in ipairs(foundItems) do
+			print(
+				i .. ") " ..
+				item.name ..
+				" [" .. item.class .. "] -> " ..
+				item.path
+			)
+		end
+	end
+
+	print("=========================================================")
+end
+
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
@@ -1054,5 +1135,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		printMyCoords()
 	elseif input.KeyCode == TOKEN_PART_SCAN_KEY then
 		scanTokenPartsNearMe()
+	elseif input.KeyCode == MERCHANT_SCAN_KEY then
+		scanTravellingMerchantInventory()
 	end
 end)
