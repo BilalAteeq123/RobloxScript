@@ -1169,6 +1169,7 @@ local function deepScanTravellingMerchant()
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	print("[INPUT]", input.KeyCode, "processed =", gameProcessed)
 	if gameProcessed then
 		return
 	end
@@ -1191,3 +1192,5 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		deepScanTravellingMerchant()
 	end
 end)
+
+task.delay(2, deepScanTravellingMerchant)

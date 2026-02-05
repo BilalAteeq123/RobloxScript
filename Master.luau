@@ -1,0 +1,567 @@
+-- Travel Tokens + Merchant Teleport (Minimal)
+-- E = Teleport to TravelToken1, then 1s later TravelToken2 (if they exist)
+-- Q = Teleport to travelling merchant (if not found, prints "no merchant")
+-- Auto-teleport: when TravelToken1/2 timer hits 0, teleport to that token
+-- J = Manually send webhook (includes weather + merchant selling list / selling nothing)
+-- H = Server hop (manual)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+local MERCHANT_TELEPORT_KEY = Enum.KeyCode.Q
+local TOKEN_TELEPORT_KEY = Enum.KeyCode.E
+local WEBHOOK_KEY = Enum.KeyCode.J
+local SERVER_HOP_KEY = Enum.KeyCode.H
+
+local TELEPORT_OFFSET = Vector3.new(8, 2, 8)
+local TOKEN_EXTRA_Y = 0.5
+
+local WATCHED_TOKENS = {
+	{tokenName = "TravelToken1", timerName = "TravelToken1ParkourTimer"},
+	{tokenName = "TravelToken2", timerName = "TravelToken2ParkourTimer"},
+}
+
+local TRAVELLING_MERCHANT_KEYWORDS = {
+	"travelling", "traveling", "wandering", "merchantstand", "merchant stand"
+}
+
+-- =========================
+-- DISCORD WEBHOOK LOGIC
+-- =========================
+
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1468533154687225929/dzN_OZqHJlohalYYE5_ZEIEkRa12o_gnC18lT4vfTMZstrq0M4fFShCgqQLWofB_tqyD"
+
+local function getCurrentServerLinks()
+	return {
+		profileJoin = "https://www.roblox.com/users/" .. player.UserId .. "/profile",
+		gamePage = "https://www.roblox.com/games/" .. game.PlaceId
+	}
+end
+
+local function getActiveWeatherNames()
+	local weatherFolder =
+		workspace:FindFirstChild("VFX")
+		and workspace.VFX:FindFirstChild("Weather")
+
+	local names = {}
+
+	if weatherFolder then
+		for _, child in ipairs(weatherFolder:GetChildren()) do
+			table.insert(names, child.Name)
+		end
+	end
+
+	return names
+end
+
+-- =========================
+-- MERCHANT FIND + SHOP OUTPUT
+-- =========================
+
+local function isCharacterModel(model)
+	return model and model:IsA("Model") and model:FindFirstChildOfClass("Humanoid") ~= nil
+end
+
+local function getModelTeleportPart(model)
+	if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then
+		return model.PrimaryPart
+	end
+	return model:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function findTravellingMerchant()
+	local best = nil
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") and obj ~= character and not isCharacterModel(obj) then
+			local objName = string.lower(obj.Name)
+
+			if objName == "merchantstand" then
+				return obj
+			end
+
+			for _, k in ipairs(TRAVELLING_MERCHANT_KEYWORDS) do
+				if string.find(objName, k, 1, true) then
+					best = obj
+					break
+				end
+			end
+		end
+
+		if best then
+			break
+		end
+	end
+
+	return best
+end
+
+local function getTravellingMerchantSelling()
+	local merchant = findTravellingMerchant()
+	if not merchant then
+		return {}, nil
+	end
+
+	local foundItems = {}
+	local seen = {}
+
+	local function registerItem(name)
+		if not name or name == "" then
+			return
+		end
+		if not seen[name] then
+			seen[name] = true
+			table.insert(foundItems, name)
+		end
+	end
+
+	for _, d in ipairs(merchant:GetDescendants()) do
+		if d:IsA("Tool") then
+			registerItem(d.Name)
+
+		elseif d:IsA("TextButton") or d:IsA("ImageButton") then
+			local label = d.Text or d.Name
+			if label ~= "" then
+				registerItem(label)
+			end
+
+		elseif d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
+			local parent = d.Parent
+			if parent then
+				registerItem(parent.Name)
+			end
+
+		elseif d:IsA("Model") or d:IsA("BasePart") then
+			for _, v in ipairs(d:GetDescendants()) do
+				if v:IsA("IntValue") or v:IsA("NumberValue") then
+					local n = string.lower(v.Name)
+					if n:find("price", 1, true)
+						or n:find("cost", 1, true)
+						or n:find("buy", 1, true)
+						or n:find("sell", 1, true)
+					then
+						registerItem(d.Name)
+						break
+					end
+				end
+			end
+		end
+	end
+
+	table.sort(foundItems, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+
+	return foundItems, merchant
+end
+
+local function sendWeatherWebhook(triggerReason)
+	local weatherNames = getActiveWeatherNames()
+	local links = getCurrentServerLinks()
+
+	local selling, merchant = getTravellingMerchantSelling()
+
+	local embedTitle
+	local embedDescription
+
+	if #weatherNames > 0 then
+		embedTitle = "Weather detected"
+		embedDescription = table.concat(weatherNames, ", ")
+	else
+		embedTitle = "No weather"
+		embedDescription = "No active weather in this server"
+	end
+
+	local merchantText
+	if #selling > 0 then
+		local maxItems = 25
+		if #selling > maxItems then
+			local sliced = {}
+			for i = 1, maxItems do
+				table.insert(sliced, selling[i])
+			end
+			merchantText = table.concat(sliced, "\n") .. "\n... (+" .. tostring(#selling - maxItems) .. " more)"
+		else
+			merchantText = table.concat(selling, "\n")
+		end
+	else
+		merchantText = "selling nothing"
+	end
+
+	local merchantName = merchant and merchant.Name or "No merchant found"
+
+	request({
+		Url = WEBHOOK_URL,
+		Method = "POST",
+		Headers = {
+			["Content-Type"] = "application/json"
+		},
+		Body = HttpService:JSONEncode({
+			content =
+				"📣 **Webhook trigger:** " .. tostring(triggerReason) .. "\n\n" ..
+				"👤 **Join via profile:**\n" ..
+				links.profileJoin ..
+				"\n\n🎮 Game page:\n" ..
+				links.gamePage,
+
+			embeds = {
+				{
+					title = embedTitle,
+					description = embedDescription,
+					color = 0xffffff,
+					fields = {
+						{
+							name = "Travelling Merchant",
+							value = merchantName,
+							inline = false
+						},
+						{
+							name = "Merchant is selling",
+							value = merchantText,
+							inline = false
+						}
+					}
+				}
+			}
+		})
+	})
+end
+
+-- =========================
+-- CHARACTER / TELEPORT LOGIC
+-- =========================
+
+local function bindCharacter(newCharacter)
+	character = newCharacter
+	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+end
+
+player.CharacterAdded:Connect(bindCharacter)
+
+local function ensureHumanoidRootPart()
+	if not character or not character.Parent then
+		character = player.Character or player.CharacterAdded:Wait()
+	end
+	if not humanoidRootPart or not humanoidRootPart.Parent then
+		humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+	end
+end
+
+local function teleportToInstanceWithOffset(targetInstance, offset)
+	ensureHumanoidRootPart()
+
+	local targetPart = nil
+
+	if targetInstance:IsA("BasePart") then
+		targetPart = targetInstance
+	elseif targetInstance:IsA("Model") then
+		targetPart = getModelTeleportPart(targetInstance)
+	else
+		local asModel = targetInstance:FindFirstAncestorOfClass("Model")
+		if asModel then
+			targetPart = getModelTeleportPart(asModel)
+		end
+	end
+
+	if targetPart then
+		local targetPosition = targetPart.Position + offset
+		humanoidRootPart.CFrame = CFrame.new(targetPosition)
+		print("Teleported to: " .. targetInstance.Name)
+		return true
+	end
+
+	return false
+end
+
+local function teleportToTravellingMerchant()
+	local merchant = findTravellingMerchant()
+	if not merchant then
+		print("no merchant")
+		return
+	end
+
+	local ok = teleportToInstanceWithOffset(merchant, TELEPORT_OFFSET)
+	if not ok then
+		print("no merchant")
+		return
+	end
+
+	local selling = getTravellingMerchantSelling()
+	if selling and #selling > 0 then
+		print("========== [TRAVELLING MERCHANT SHOP] ==========")
+		for i, name in ipairs(selling) do
+			print(i .. ") " .. tostring(name))
+		end
+		print("===============================================")
+	else
+		print("========== [TRAVELLING MERCHANT SHOP] ==========")
+		print("selling nothing")
+		print("===============================================")
+	end
+end
+
+local function getBestPickupPart(inst)
+	if inst:IsA("BasePart") then
+		return inst
+	end
+
+	local model = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
+	if not model then
+		return nil
+	end
+
+	local bestPart
+	local bestScore = -1
+
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local score = d.Size.Magnitude
+			if d:FindFirstChildOfClass("TouchTransmitter") then
+				score += 100
+			end
+			if score > bestScore then
+				bestScore = score
+				bestPart = d
+			end
+		end
+	end
+
+	return bestPart
+end
+
+local function teleportOnTopOfToken(tokenInstance)
+	ensureHumanoidRootPart()
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	local part = getBestPickupPart(tokenInstance)
+	if not part then
+		return
+	end
+
+	local y =
+		part.Position.Y
+		+ (part.Size.Y * 0.5)
+		+ humanoid.HipHeight
+		+ (humanoidRootPart.Size.Y * 0.5)
+		+ TOKEN_EXTRA_Y
+
+	humanoidRootPart.CFrame = CFrame.new(part.Position.X, y, part.Position.Z)
+end
+
+local function findWorldTokenByName(tokenName)
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj.Name == tokenName and (obj:IsA("BasePart") or obj:IsA("Model")) then
+			if not obj:IsDescendantOf(character) then
+				return obj
+			end
+		end
+	end
+end
+
+-- =========================
+-- TIMER WATCH (AUTO TELEPORT ONLY, NO WEBHOOK)
+-- =========================
+
+local timerConnections = {}
+local lastTeleportAt = {}
+
+local function parseTimerFromText(text)
+	local mm, ss = tostring(text):match("(%d+)%s*:%s*(%d+)")
+	if mm and ss then
+		return (tonumber(mm) * 60) + tonumber(ss)
+	end
+	return tonumber(text)
+end
+
+local function watchParkourTimer(tokenName, timerName)
+	if timerConnections[timerName] then
+		return
+	end
+
+	local timerContainer = workspace:FindFirstChild(timerName, true)
+	if not timerContainer then
+		return
+	end
+
+	local label
+	for _, d in ipairs(timerContainer:GetDescendants()) do
+		if d:IsA("TextLabel") and d.Text:find("%d") then
+			label = d
+			break
+		end
+	end
+
+	if not label then
+		timerConnections[timerName] = "no_label"
+		return
+	end
+
+	local function onChanged()
+		local v = parseTimerFromText(label.Text)
+		if v and v <= 0 then
+			local now = os.clock()
+			if lastTeleportAt[timerName] and (now - lastTeleportAt[timerName]) < 1 then
+				return
+			end
+			lastTeleportAt[timerName] = now
+
+			local token = findWorldTokenByName(tokenName)
+			if token then
+				teleportOnTopOfToken(token)
+			end
+		end
+	end
+
+	timerConnections[timerName] = label:GetPropertyChangedSignal("Text"):Connect(onChanged)
+	onChanged()
+end
+
+task.spawn(function()
+	while true do
+		for _, info in ipairs(WATCHED_TOKENS) do
+			if timerConnections[info.timerName] ~= "no_label" then
+				watchParkourTimer(info.tokenName, info.timerName)
+			end
+		end
+		task.wait(1)
+	end
+end)
+
+-- =========================
+-- SERVER HOP LOGIC (MANUAL KEY)
+-- =========================
+
+local lastTeleportAttempt = 0
+local TELEPORT_COOLDOWN = 5
+
+local placeId = game.PlaceId
+local currentJobId = game.JobId
+
+local SERVER_COOLDOWN = 10 * 60
+
+local visitedServers = visitedServers or {}
+visitedServers[currentJobId] = os.time()
+
+TeleportService.TeleportInitFailed:Connect(function(p, result, err)
+	if p ~= Players.LocalPlayer then
+		return
+	end
+
+	warn("[SERVER HOP] Teleport failed:", result, err)
+
+	local char = p.Character
+	if char then
+		for _, v in ipairs(char:GetDescendants()) do
+			if v:IsA("BasePart") then
+				v.Anchored = false
+			end
+		end
+	end
+end)
+
+local function isOnCooldown(serverId)
+	local lastVisit = visitedServers[serverId]
+	if not lastVisit then
+		return false
+	end
+	return (os.time() - lastVisit) < SERVER_COOLDOWN
+end
+
+local function getServers(cursor)
+	local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?limit=100"
+	if cursor then
+		url = url .. "&cursor=" .. cursor
+	end
+
+	return HttpService:JSONDecode(game:HttpGet(url))
+end
+
+local hopping = false
+
+local function hopServer()
+	if hopping then
+		return
+	end
+	hopping = true
+
+	if os.clock() - lastTeleportAttempt < TELEPORT_COOLDOWN then
+		warn("[SERVER HOP] Teleport cooldown active")
+		hopping = false
+		return
+	end
+
+	lastTeleportAttempt = os.clock()
+
+	local cursor = nil
+
+	while true do
+		local success, data = pcall(function()
+			return getServers(cursor)
+		end)
+
+		if not success or not data or type(data.data) ~= "table" then
+			warn("[SERVER HOP] Server list unavailable (rate limited?). Retrying...")
+			task.wait(2)
+			hopping = false
+			return
+		end
+
+		for _, server in ipairs(data.data) do
+			if server.id ~= currentJobId
+				and server.playing < server.maxPlayers
+				and not isOnCooldown(server.id)
+			then
+				visitedServers[server.id] = os.time()
+				TeleportService:TeleportToPlaceInstance(placeId, server.id, player)
+				return
+			end
+		end
+
+		if not data.nextPageCursor then
+			break
+		end
+
+		cursor = data.nextPageCursor
+		task.wait(0.2)
+	end
+
+	hopping = false
+	warn("[SERVER HOP] No available servers found outside cooldown")
+end
+
+-- =========================
+-- INPUT BINDS
+-- =========================
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+
+	if input.KeyCode == TOKEN_TELEPORT_KEY then
+		task.spawn(function()
+			local t1 = findWorldTokenByName("TravelToken1")
+			local t2 = findWorldTokenByName("TravelToken2")
+			if t1 then teleportOnTopOfToken(t1) end
+			task.wait(1)
+			if t2 then teleportOnTopOfToken(t2) end
+		end)
+	elseif input.KeyCode == MERCHANT_TELEPORT_KEY then
+		teleportToTravellingMerchant()
+	elseif input.KeyCode == WEBHOOK_KEY then
+		sendWeatherWebhook("Manual Key")
+	elseif input.KeyCode == SERVER_HOP_KEY then
+		print("[SERVER HOP] Attempting to hop servers...")
+		hopServer()
+	end
+end)
