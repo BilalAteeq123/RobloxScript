@@ -39,8 +39,7 @@ local WEBHOOK_URL = "https://discord.com/api/webhooks/1468533154687225929/dzN_OZ
 
 local function getCurrentServerLinks()
 	return {
-		profileJoin = "https://www.roblox.com/users/" .. player.UserId .. "/profile",
-		gamePage = "https://www.roblox.com/games/" .. game.PlaceId
+		profileJoin = "https://www.roblox.com/users/" .. player.UserId .. "/profile"
 	}
 end
 
@@ -64,20 +63,39 @@ end
 -- MERCHANT FIND + SHOP OUTPUT
 -- =========================
 
+local function bindCharacter(newCharacter)
+	character = newCharacter
+	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+end
+
+player.CharacterAdded:Connect(bindCharacter)
+
+local function ensureHumanoidRootPart()
+	if not character or not character.Parent then
+		character = player.Character or player.CharacterAdded:Wait()
+	end
+	if not humanoidRootPart or not humanoidRootPart.Parent then
+		humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+	end
+end
+
 local function isCharacterModel(model)
 	return model and model:IsA("Model") and model:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
 local function getModelTeleportPart(model)
+	if not model then
+		return nil
+	end
+
 	if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then
 		return model.PrimaryPart
 	end
+
 	return model:FindFirstChildWhichIsA("BasePart", true)
 end
 
 local function findTravellingMerchant()
-	local best = nil
-
 	for _, obj in ipairs(workspace:GetDescendants()) do
 		if obj:IsA("Model") and obj ~= character and not isCharacterModel(obj) then
 			local objName = string.lower(obj.Name)
@@ -88,18 +106,71 @@ local function findTravellingMerchant()
 
 			for _, k in ipairs(TRAVELLING_MERCHANT_KEYWORDS) do
 				if string.find(objName, k, 1, true) then
-					best = obj
-					break
+					return obj
 				end
 			end
 		end
-
-		if best then
-			break
-		end
 	end
 
-	return best
+	return nil
+end
+
+local function teleportNearModelOnGround(model, horizontalDistance)
+	ensureHumanoidRootPart()
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return false
+	end
+
+	local basePart = getModelTeleportPart(model)
+	if not basePart then
+		return false
+	end
+
+	local merchantPos = basePart.Position
+
+	local referencePos = Vector3.new(-534, 9, -419)
+
+	local dir = (referencePos - merchantPos)
+	dir = Vector3.new(dir.X, 0, dir.Z)
+
+	if dir.Magnitude < 0.05 then
+		dir = Vector3.new(1, 0, 0)
+	else
+		dir = dir.Unit
+	end
+
+	local desiredXZ = merchantPos + (dir * horizontalDistance)
+
+	local rayOrigin = desiredXZ + Vector3.new(0, 80, 0)
+	local rayDir = Vector3.new(0, -250, 0)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local ignore = {}
+	table.insert(ignore, character)
+	table.insert(ignore, model)
+	rayParams.FilterDescendantsInstances = ignore
+	rayParams.IgnoreWater = true
+
+	local result = workspace:Raycast(rayOrigin, rayDir, rayParams)
+
+	if result then
+		local standY = humanoid.HipHeight + (humanoidRootPart.Size.Y * 0.5) + 0.15
+		local finalPos = Vector3.new(
+			desiredXZ.X,
+			result.Position.Y + standY + TOKEN_EXTRA_Y,
+			desiredXZ.Z
+		)
+		humanoidRootPart.CFrame = CFrame.new(finalPos)
+		return true
+	end
+
+	local fallbackPos = desiredXZ + Vector3.new(0, 6, 0)
+	humanoidRootPart.CFrame = CFrame.new(fallbackPos)
+	return true
 end
 
 local function getTravellingMerchantSelling()
@@ -161,7 +232,7 @@ local function getTravellingMerchantSelling()
 	return foundItems, merchant
 end
 
-local function sendWeatherWebhook(triggerReason)
+local function sendWeatherWebhook()
 	local weatherNames = getActiveWeatherNames()
 	local links = getCurrentServerLinks()
 
@@ -204,11 +275,8 @@ local function sendWeatherWebhook(triggerReason)
 		},
 		Body = HttpService:JSONEncode({
 			content =
-				"📣 **Webhook trigger:** " .. tostring(triggerReason) .. "\n\n" ..
 				"👤 **Join via profile:**\n" ..
-				links.profileJoin ..
-				"\n\n🎮 Game page:\n" ..
-				links.gamePage,
+				links.profileJoin,
 
 			embeds = {
 				{
@@ -233,78 +301,21 @@ local function sendWeatherWebhook(triggerReason)
 	})
 end
 
--- =========================
--- CHARACTER / TELEPORT LOGIC
--- =========================
-
-local function bindCharacter(newCharacter)
-	character = newCharacter
-	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
-end
-
-player.CharacterAdded:Connect(bindCharacter)
-
-local function ensureHumanoidRootPart()
-	if not character or not character.Parent then
-		character = player.Character or player.CharacterAdded:Wait()
-	end
-	if not humanoidRootPart or not humanoidRootPart.Parent then
-		humanoidRootPart = character:WaitForChild("HumanoidRootPart")
-	end
-end
-
-local function teleportToInstanceWithOffset(targetInstance, offset)
-	ensureHumanoidRootPart()
-
-	local targetPart = nil
-
-	if targetInstance:IsA("BasePart") then
-		targetPart = targetInstance
-	elseif targetInstance:IsA("Model") then
-		targetPart = getModelTeleportPart(targetInstance)
-	else
-		local asModel = targetInstance:FindFirstAncestorOfClass("Model")
-		if asModel then
-			targetPart = getModelTeleportPart(asModel)
-		end
-	end
-
-	if targetPart then
-		local targetPosition = targetPart.Position + offset
-		humanoidRootPart.CFrame = CFrame.new(targetPosition)
-		print("Teleported to: " .. targetInstance.Name)
-		return true
-	end
-
-	return false
-end
-
 local function teleportToTravellingMerchant()
 	local merchant = findTravellingMerchant()
-	if not merchant then
-		print("no merchant")
-		return
-	end
-
-	local ok = teleportToInstanceWithOffset(merchant, TELEPORT_OFFSET)
-	if not ok then
-		print("no merchant")
-		return
-	end
-
-	local selling = getTravellingMerchantSelling()
-	if selling and #selling > 0 then
-		print("========== [TRAVELLING MERCHANT SHOP] ==========")
-		for i, name in ipairs(selling) do
-			print(i .. ") " .. tostring(name))
+	if merchant then
+		local ok = teleportNearModelOnGround(merchant, 10)
+		if not ok then
+			print("no merchant")
 		end
-		print("===============================================")
 	else
-		print("========== [TRAVELLING MERCHANT SHOP] ==========")
-		print("selling nothing")
-		print("===============================================")
+		print("no merchant")
 	end
 end
+
+-- =========================
+-- TOKEN TELEPORT LOGIC
+-- =========================
 
 local function getBestPickupPart(inst)
 	if inst:IsA("BasePart") then
@@ -368,8 +379,23 @@ local function findWorldTokenByName(tokenName)
 	end
 end
 
+local function teleportToBothSpawnedTravelTokens()
+	local token1 = findWorldTokenByName("TravelToken1")
+	local token2 = findWorldTokenByName("TravelToken2")
+
+	if token1 then
+		teleportOnTopOfToken(token1)
+	end
+
+	task.wait(1)
+
+	if token2 then
+		teleportOnTopOfToken(token2)
+	end
+end
+
 -- =========================
--- TIMER WATCH (AUTO TELEPORT ONLY, NO WEBHOOK)
+-- TIMER WATCH (AUTO TELEPORT ONLY)
 -- =========================
 
 local timerConnections = {}
@@ -549,17 +575,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 
 	if input.KeyCode == TOKEN_TELEPORT_KEY then
-		task.spawn(function()
-			local t1 = findWorldTokenByName("TravelToken1")
-			local t2 = findWorldTokenByName("TravelToken2")
-			if t1 then teleportOnTopOfToken(t1) end
-			task.wait(1)
-			if t2 then teleportOnTopOfToken(t2) end
-		end)
+		task.spawn(teleportToBothSpawnedTravelTokens)
 	elseif input.KeyCode == MERCHANT_TELEPORT_KEY then
 		teleportToTravellingMerchant()
 	elseif input.KeyCode == WEBHOOK_KEY then
-		sendWeatherWebhook("Manual Key")
+		sendWeatherWebhook()
 	elseif input.KeyCode == SERVER_HOP_KEY then
 		print("[SERVER HOP] Attempting to hop servers...")
 		hopServer()
