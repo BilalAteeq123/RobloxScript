@@ -18,6 +18,7 @@ local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 local DIAGNOSTIC_KEY = Enum.KeyCode.Q
 local MERCHANT_TELEPORT_KEY = Enum.KeyCode.T
 local TOKEN_TELEPORT_KEY = Enum.KeyCode.V
+local MERCHANT_DEEP_SCAN_KEY = Enum.KeyCode.U
 
 local COORD_TOGGLE_KEY = Enum.KeyCode.R -- toggle HUD
 local COORD_PRINT_KEY = Enum.KeyCode.F -- print coords once
@@ -1117,6 +1118,55 @@ local function scanTravellingMerchantInventory()
 	print("=========================================================")
 end
 
+local function deepScanTravellingMerchant()
+	local merchant = findTravellingMerchant()
+	if not merchant then
+		print("[MERCHANT DEEP SCAN] No travelling merchant found.")
+		return
+	end
+
+	print("========== [MERCHANT DEEP SCAN BEGIN] ==========")
+	print("Merchant model:", merchant:GetFullName())
+
+	local total = 0
+
+	for _, d in ipairs(merchant:GetDescendants()) do
+		total += 1
+
+		local line =
+			"- " ..
+			d.ClassName ..
+			" | " ..
+			d.Name ..
+			" | " ..
+			d:GetFullName()
+
+		-- Dump value contents
+		if d:IsA("IntValue")
+			or d:IsA("NumberValue")
+			or d:IsA("StringValue")
+			or d:IsA("BoolValue")
+			or d:IsA("ObjectValue")
+		then
+			local val
+			pcall(function()
+				val = d.Value
+			end)
+			line = line .. " => VALUE: " .. tostring(val)
+		end
+
+		print(line)
+
+		-- Dump attributes if any
+		local attrs = d:GetAttributes()
+		for k, v in pairs(attrs) do
+			print("    [ATTR] " .. k .. " = " .. tostring(v))
+		end
+	end
+
+	print("[MERCHANT DEEP SCAN] Total descendants:", total)
+	print("=========== [MERCHANT DEEP SCAN END] ===========")
+end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
@@ -1137,5 +1187,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		scanTokenPartsNearMe()
 	elseif input.KeyCode == MERCHANT_SCAN_KEY then
 		scanTravellingMerchantInventory()
+	elseif input.KeyCode == MERCHANT_DEEP_SCAN_KEY then
+		deepScanTravellingMerchant()
 	end
 end)
