@@ -19,7 +19,6 @@ local TOKEN_TELEPORT_KEY = Enum.KeyCode.E
 local WEBHOOK_KEY = Enum.KeyCode.J
 local SERVER_HOP_KEY = Enum.KeyCode.H
 
-local TELEPORT_OFFSET = Vector3.new(8, 2, 8)
 local TOKEN_EXTRA_Y = 0.5
 
 local WATCHED_TOKENS = {
@@ -60,7 +59,7 @@ local function getActiveWeatherNames()
 end
 
 -- =========================
--- MERCHANT FIND + SHOP OUTPUT
+-- CHARACTER / COMMON HELPERS
 -- =========================
 
 local function bindCharacter(newCharacter)
@@ -94,6 +93,10 @@ local function getModelTeleportPart(model)
 
 	return model:FindFirstChildWhichIsA("BasePart", true)
 end
+
+-- =========================
+-- MERCHANT FIND + TELEPORT (REFERENCE POINT + RAYCAST)
+-- =========================
 
 local function findTravellingMerchant()
 	for _, obj in ipairs(workspace:GetDescendants()) do
@@ -173,70 +176,103 @@ local function teleportNearModelOnGround(model, horizontalDistance)
 	return true
 end
 
+-- =========================
+-- MERCHANT SELLING (GUI-BASED: TravelMerchant)
+-- =========================
+
 local function getTravellingMerchantSelling()
-	local merchant = findTravellingMerchant()
-	if not merchant then
-		return {}, nil
+	local sellingLines = {}
+
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then
+		return sellingLines
 	end
 
-	local foundItems = {}
-	local seen = {}
-
-	local function registerItem(name)
-		if not name or name == "" then
-			return
-		end
-		if not seen[name] then
-			seen[name] = true
-			table.insert(foundItems, name)
-		end
+	local gui = playerGui:FindFirstChild("TravelMerchant")
+	if not gui then
+		return sellingLines
 	end
 
-	for _, d in ipairs(merchant:GetDescendants()) do
-		if d:IsA("Tool") then
-			registerItem(d.Name)
+	local frame = gui:FindFirstChild("Frame")
+	local scrollingFrame = frame and frame:FindFirstChild("ScrollingFrame")
+	if not scrollingFrame then
+		return sellingLines
+	end
 
-		elseif d:IsA("TextButton") or d:IsA("ImageButton") then
-			local label = d.Text or d.Name
-			if label ~= "" then
-				registerItem(label)
-			end
+	for _, itemFrame in ipairs(scrollingFrame:GetChildren()) do
+		if not itemFrame:IsA("Frame") then
+			continue
+		end
 
-		elseif d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
-			local parent = d.Parent
-			if parent then
-				registerItem(parent.Name)
-			end
+		local itemName = itemFrame.Name
+		local baseName = itemName
+		local mutation = nil
 
-		elseif d:IsA("Model") or d:IsA("BasePart") then
-			for _, v in ipairs(d:GetDescendants()) do
-				if v:IsA("IntValue") or v:IsA("NumberValue") then
-					local n = string.lower(v.Name)
-					if n:find("price", 1, true)
-						or n:find("cost", 1, true)
-						or n:find("buy", 1, true)
-						or n:find("sell", 1, true)
-					then
-						registerItem(d.Name)
-						break
-					end
+		if itemName:find("-", 1, true) then
+			baseName, mutation = itemName:match("(.+)%-(.+)")
+		end
+
+		local lowerBase = string.lower(baseName)
+		local itemType = "Card"
+		if lowerBase:find("mutation", 1, true) then
+			itemType = "Mutation / Potion"
+		elseif lowerBase:find("totem", 1, true) then
+			itemType = "Totem"
+		end
+
+		local price = nil
+		local requirements = itemFrame:FindFirstChild("Requirements", true)
+		if requirements then
+			local cash = requirements:FindFirstChild("Cash", true)
+			if cash then
+				local display = cash:FindFirstChild("Display", true)
+				if display and display:IsA("TextLabel") then
+					price = display.Text
 				end
 			end
 		end
+
+		local nameText = baseName
+		if mutation and mutation ~= "" then
+			nameText = nameText .. " (" .. mutation .. ")"
+		end
+
+		local priceText = price or "Unknown"
+		local line = nameText .. " | " .. itemType .. " | " .. priceText
+		table.insert(sellingLines, line)
 	end
 
-	table.sort(foundItems, function(a, b)
+	table.sort(sellingLines, function(a, b)
 		return tostring(a) < tostring(b)
 	end)
 
-	return foundItems, merchant
+	return sellingLines
 end
+
+local function printTravellingMerchantShop()
+	local selling = getTravellingMerchantSelling()
+
+	print("========== [TRAVELLING MERCHANT SHOP] ==========")
+	if #selling > 0 then
+		for i, line in ipairs(selling) do
+			print(i .. ") " .. tostring(line))
+		end
+	else
+		print("selling nothing")
+	end
+	print("===============================================")
+end
+
+-- =========================
+-- WEBHOOK SENDER (MANUAL KEY ONLY)
+-- =========================
 
 local function sendWeatherWebhook()
 	local weatherNames = getActiveWeatherNames()
 	local links = getCurrentServerLinks()
 
-	local selling, merchant = getTravellingMerchantSelling()
+	local selling = getTravellingMerchantSelling()
+	local merchant = findTravellingMerchant()
 
 	local embedTitle
 	local embedDescription
@@ -307,7 +343,9 @@ local function teleportToTravellingMerchant()
 		local ok = teleportNearModelOnGround(merchant, 10)
 		if not ok then
 			print("no merchant")
+			return
 		end
+		printTravellingMerchantShop()
 	else
 		print("no merchant")
 	end
