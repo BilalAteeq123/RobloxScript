@@ -249,6 +249,109 @@ local function getTravellingMerchantSelling()
 	return sellingLines
 end
 
+local function waitForMerchantItems(maxWaitSeconds)
+	local t0 = os.clock()
+	while os.clock() - t0 < (maxWaitSeconds or 2) do
+		local selling = getTravellingMerchantSelling()
+		if #selling > 0 then
+			return selling
+		end
+		task.wait(0.1)
+	end
+	return getTravellingMerchantSelling()
+end
+
+local function clampDiscordFieldValue(text)
+	text = tostring(text or "")
+	if #text <= 1024 then
+		return text
+	end
+	return string.sub(text, 1, 1021) .. "..."
+end
+
+local function sendWeatherWebhook()
+	local weatherNames = getActiveWeatherNames()
+	local links = getCurrentServerLinks()
+
+	-- IMPORTANT: wait a moment for the shop UI to populate (if it's open)
+	local selling = waitForMerchantItems(2)
+
+	local merchant = findTravellingMerchant()
+
+	local embedTitle
+	local embedDescription
+
+	if #weatherNames > 0 then
+		embedTitle = "Weather detected"
+		embedDescription = table.concat(weatherNames, ", ")
+	else
+		embedTitle = "No weather"
+		embedDescription = "No active weather in this server"
+	end
+
+	local merchantText
+	if #selling > 0 then
+		merchantText = table.concat(selling, "\n")
+	else
+		merchantText = "selling nothing"
+	end
+
+	merchantText = clampDiscordFieldValue(merchantText)
+
+	local merchantName = merchant and merchant.Name or "No merchant found"
+
+	local payload = {
+		content =
+			"👤 **Join via profile:**\n" ..
+			links.profileJoin,
+		embeds = {
+			{
+				title = embedTitle,
+				description = embedDescription,
+				color = 0xffffff,
+				fields = {
+					{
+						name = "Travelling Merchant",
+						value = clampDiscordFieldValue(merchantName),
+						inline = false
+					},
+					{
+						name = "Merchant is selling",
+						value = merchantText,
+						inline = false
+					}
+				}
+			}
+		}
+	}
+
+	local ok, res = pcall(function()
+		return request({
+			Url = WEBHOOK_URL,
+			Method = "POST",
+			Headers = {
+				["Content-Type"] = "application/json"
+			},
+			Body = HttpService:JSONEncode(payload)
+		})
+	end)
+
+	if not ok then
+		warn("[WEBHOOK] request failed:", res)
+		return
+	end
+
+	if res then
+		print("[WEBHOOK] status:", res.StatusCode or res.Status or "unknown")
+		if res.Body then
+			print("[WEBHOOK] body:", tostring(res.Body))
+		end
+	else
+		print("[WEBHOOK] sent (no response object)")
+	end
+end
+
+
 local function printTravellingMerchantShop()
 	local selling = getTravellingMerchantSelling()
 
