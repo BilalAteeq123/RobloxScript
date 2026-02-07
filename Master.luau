@@ -14,12 +14,23 @@
 -- , = Toggle weather step on/off (inside full auto cycle)
 -- - = Toggle hop step on/off (inside full auto cycle)
 
+local ALLOWED_PLACE_ID = 76285745979410
+
+if game.PlaceId ~= ALLOWED_PLACE_ID then
+	warn("[TRAVEL SCRIPT] Wrong game detected. Script will not load.")
+	return
+end
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
 local player = Players.LocalPlayer
+if not player then
+	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	player = Players.LocalPlayer
+end
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
