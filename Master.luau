@@ -1,5 +1,5 @@
 -- Travel Tokens + Merchant Teleport (Minimal)
--- v = Teleport to TravelToken1, then 1s later TravelToken2 (if they exist)
+-- V = Teleport to TravelToken1, then 1s later TravelToken2 (if they exist)
 -- Q = Teleport to travelling merchant (if not found, prints "no merchant")
 -- Auto-teleport: when TravelToken1/2 timer hits 0, teleport to that token
 -- J = Manually send webhook (includes weather + merchant selling list / selling nothing)
@@ -74,6 +74,13 @@ local function canFileIO()
 	return type(readfile) == "function"
 		and type(writefile) == "function"
 		and type(isfile) == "function"
+end
+
+local function getJitter(maxJitter)
+	if not maxJitter or maxJitter <= 0 then
+		return 0
+	end
+	return (os.clock() % 1) * maxJitter
 end
 
 local function ensureConfigFolder()
@@ -1172,7 +1179,7 @@ local SERVER_LIST_RETRY_DELAY_MAX = 1.0
 local SERVER_LIST_RETRY_JITTER_MAX = 0.15
 
 -- table to track visited servers
--- [serverId] flushActiveEventEndNotifications= lastVisitUnixTime
+-- [serverId] = lastVisitUnixTime
 local visitedServers = visitedServers or {}
 
 -- mark current server as visited
@@ -1338,7 +1345,8 @@ function hopServer()
 			end
 
 			if attempt < SERVER_LIST_RETRY_MAX then
-				local jitter = (math.random() * SERVER_LIST_RETRY_JITTER_MAX)
+				
+				local jitter = getJitter(SERVER_LIST_RETRY_JITTER_MAX)
 				warn(string.format(
 					"[SERVER HOP] Server list unavailable (rate limited?). Retry %d/%d in %.2fs...",
 					attempt,
