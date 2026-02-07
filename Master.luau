@@ -9,10 +9,10 @@
 -- P = Toggle FULL AUTO CYCLE on/off (token -> merchant scan -> weather scan -> hop)
 -- K = Merchant scan + webhook (only if selling special pack list)
 -- L = Weather scan + webhook @everyone (only if Blood Moon / Sandstorm)
--- [ / ] = Toggle token step on/off (inside full auto cycle)
--- ; / ' = Toggle merchant step on/off (inside full auto cycle)
--- , / . = Toggle weather step on/off (inside full auto cycle)
--- - / = = Toggle hop step on/off (inside full auto cycle)
+-- [ = Toggle token step on/off (inside full auto cycle)
+-- ; = Toggle merchant step on/off (inside full auto cycle)
+-- , = Toggle weather step on/off (inside full auto cycle)
+-- - = Toggle hop step on/off (inside full auto cycle)
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -32,14 +32,10 @@ local AUTO_TOGGLE_KEY = Enum.KeyCode.P
 local MERCHANT_SCAN_KEY = Enum.KeyCode.K
 local WEATHER_SCAN_KEY = Enum.KeyCode.L
 
-local TOGGLE_TOKENS_ON_KEY = Enum.KeyCode.LeftBracket
-local TOGGLE_TOKENS_OFF_KEY = Enum.KeyCode.RightBracket
-local TOGGLE_MERCHANT_ON_KEY = Enum.KeyCode.Semicolon
-local TOGGLE_MERCHANT_OFF_KEY = Enum.KeyCode.Quote
-local TOGGLE_WEATHER_ON_KEY = Enum.KeyCode.Comma
-local TOGGLE_WEATHER_OFF_KEY = Enum.KeyCode.Period
-local TOGGLE_HOP_ON_KEY = Enum.KeyCode.Minus
-local TOGGLE_HOP_OFF_KEY = Enum.KeyCode.Equals
+local TOGGLE_TOKENS_KEY = Enum.KeyCode.LeftBracket
+local TOGGLE_MERCHANT_KEY = Enum.KeyCode.Semicolon
+local TOGGLE_WEATHER_KEY = Enum.KeyCode.Comma
+local TOGGLE_HOP_KEY = Enum.KeyCode.Minus
 
 local TOKEN_EXTRA_Y = 0.5
 
@@ -66,6 +62,127 @@ local AUTO_DO_HOP = true
 local AUTO_LOOP_DELAY = 1.0
 local AUTO_CYCLE_COOLDOWN = 6.0
 local lastAutoCycleAt = 0
+
+-- =========================
+-- JSON CONFIG (TOGGLES PERSISTENCE)
+-- =========================
+
+local CONFIG_FOLDER = "TravelScript"
+local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
+
+local function canFileIO()
+	return type(readfile) == "function"
+		and type(writefile) == "function"
+		and type(isfile) == "function"
+end
+
+local function ensureConfigFolder()
+	if type(makefolder) == "function" and type(isfolder) == "function" then
+		if not isfolder(CONFIG_FOLDER) then
+			makefolder(CONFIG_FOLDER)
+		end
+	end
+end
+
+local DEFAULT_CONFIG = {
+	AUTO_ENABLED = false,
+	AUTO_DO_TOKENS = true,
+	AUTO_DO_MERCHANT = true,
+	AUTO_DO_WEATHER = true,
+	AUTO_DO_HOP = true,
+}
+
+local function loadConfig()
+	if not canFileIO() then
+		warn("[CONFIG] File IO not available (readfile/writefile/isfile). Using in-memory defaults.")
+		return DEFAULT_CONFIG
+	end
+
+	ensureConfigFolder()
+
+	if not isfile(CONFIG_FILE) then
+		writefile(CONFIG_FILE, HttpService:JSONEncode(DEFAULT_CONFIG))
+		return DEFAULT_CONFIG
+	end
+
+	local okRead, raw = pcall(function()
+		return readfile(CONFIG_FILE)
+	end)
+
+	if not okRead or type(raw) ~= "string" or raw == "" then
+		warn("[CONFIG] Failed to read config; rewriting defaults.")
+		writefile(CONFIG_FILE, HttpService:JSONEncode(DEFAULT_CONFIG))
+		return DEFAULT_CONFIG
+	end
+
+	local okDecode, decoded = pcall(function()
+		return HttpService:JSONDecode(raw)
+	end)
+
+	if not okDecode or type(decoded) ~= "table" then
+		warn("[CONFIG] Config JSON invalid; rewriting defaults.")
+		writefile(CONFIG_FILE, HttpService:JSONEncode(DEFAULT_CONFIG))
+		return DEFAULT_CONFIG
+	end
+
+	for k, v in pairs(DEFAULT_CONFIG) do
+		if decoded[k] == nil then
+			decoded[k] = v
+		end
+	end
+
+	return decoded
+end
+
+local function saveConfig(cfg)
+	if not canFileIO() then
+		return false
+	end
+
+	ensureConfigFolder()
+
+	local okEncode, encoded = pcall(function()
+		return HttpService:JSONEncode(cfg)
+	end)
+	if not okEncode then
+		warn("[CONFIG] Failed to encode config.")
+		return false
+	end
+
+	local okWrite, err = pcall(function()
+		writefile(CONFIG_FILE, encoded)
+	end)
+	if not okWrite then
+		warn("[CONFIG] Failed to write config:", err)
+		return false
+	end
+
+	return true
+end
+
+local CONFIG = loadConfig()
+
+local function syncTogglesFromConfig()
+	AUTO_ENABLED = (CONFIG.AUTO_ENABLED == true)
+
+	AUTO_DO_TOKENS = (CONFIG.AUTO_DO_TOKENS ~= false)
+	AUTO_DO_MERCHANT = (CONFIG.AUTO_DO_MERCHANT ~= false)
+	AUTO_DO_WEATHER = (CONFIG.AUTO_DO_WEATHER ~= false)
+	AUTO_DO_HOP = (CONFIG.AUTO_DO_HOP ~= false)
+end
+
+local function syncConfigFromToggles()
+	CONFIG.AUTO_ENABLED = (AUTO_ENABLED == true)
+
+	CONFIG.AUTO_DO_TOKENS = (AUTO_DO_TOKENS == true)
+	CONFIG.AUTO_DO_MERCHANT = (AUTO_DO_MERCHANT == true)
+	CONFIG.AUTO_DO_WEATHER = (AUTO_DO_WEATHER == true)
+	CONFIG.AUTO_DO_HOP = (AUTO_DO_HOP == true)
+end
+
+syncTogglesFromConfig()
+syncConfigFromToggles()
+saveConfig(CONFIG)
 
 -- =========================
 -- SPECIAL WATCH LISTS
@@ -462,7 +579,6 @@ local function merchantScanAndWebhookIfSpecial()
 
 	teleportNearModelOnGround(merchant, 10)
 
-	-- let the shop UI populate if it opens when near merchant
 	local selling = waitForMerchantItems(2.5)
 	if #selling <= 0 then
 		return false
@@ -524,13 +640,11 @@ end
 
 -- =========================
 -- WEBHOOK SENDER (MANUAL KEY ONLY)
--- (keeps your original J behavior: always sends)
 -- =========================
 
 local function sendWeatherWebhook()
 	local weatherNames = getActiveWeatherNames()
 
-	-- wait a moment for the shop UI to populate (if it's open)
 	local selling = waitForMerchantItems(2)
 
 	local merchant = findTravellingMerchant()
@@ -793,10 +907,6 @@ end)
 
 -- =========================
 -- FULL AUTO CYCLE (ORDER YOU REQUESTED)
--- 1) check token ready -> pick up
--- 2) check merchant list -> if special packs, webhook (non-@everyone)
--- 3) check weather -> if Blood Moon / Sandstorm, webhook @everyone
--- 4) server hop
 -- =========================
 
 local function tryPickupReadyTokensInOrder()
@@ -852,10 +962,7 @@ end)
 
 -- =========================
 -- SERVER HOP LOGIC (MANUAL KEY)
--- Fixes error 267 by:
--- 1) Only targeting servers with >=2 open slots (reduces race-to-full)
--- 2) Tracking "full" servers temporarily and skipping them
--- 3) Auto-retrying on TeleportInitFailed when result is GameFull/Flooded (or similar)
+-- (EXACT LOGIC FROM YOUR WORKING SCRIPT)
 -- =========================
 
 local lastTeleportAttempt = 0
@@ -864,20 +971,63 @@ local TELEPORT_COOLDOWN = 5
 local placeId = game.PlaceId
 local currentJobId = game.JobId
 
+-- cooldown in seconds (example: 10 minutes)
 local SERVER_COOLDOWN = 10 * 60
-local FULL_SERVER_COOLDOWN = 90
-local MIN_OPEN_SLOTS = 2
 
-local MAX_HOP_RETRIES = 6
-hopRetryCount = 0
+-- extra short cooldown for servers that were full (race condition)
+local FULL_SERVER_COOLDOWN = 30
 
+-- table to track visited servers
+-- [serverId] = lastVisitUnixTime
 local visitedServers = visitedServers or {}
+
+-- mark current server as visited
 visitedServers[currentJobId] = os.time()
 
-local fullServers = fullServers or {}
-
 local hopping = false
-local lastTargetServerId = nil
+
+-- tracking current teleport attempt so we can react to "GameFull" and try a different server
+local currentAttemptServerId = nil
+local teleportOutcome = nil
+local teleportOutcomeData = nil
+
+local function unfreezeCharacter()
+	local char = player.Character
+	if char then
+		for _, v in ipairs(char:GetDescendants()) do
+			if v:IsA("BasePart") then
+				v.Anchored = false
+			end
+		end
+	end
+end
+
+TeleportService.TeleportInitFailed:Connect(function(p, result, err)
+	if p ~= Players.LocalPlayer then
+		return
+	end
+
+	warn("[SERVER HOP] Teleport failed:", result, err)
+
+	unfreezeCharacter()
+
+	teleportOutcome = "failed"
+	teleportOutcomeData = {
+		result = result,
+		err = err,
+		serverId = currentAttemptServerId
+	}
+end)
+
+player.OnTeleport:Connect(function(state)
+	-- If we reach "Started", Roblox is taking over and this hop "succeeded" (we'll leave the server)
+	if state == Enum.TeleportState.Started then
+		teleportOutcome = "started"
+		teleportOutcomeData = {
+			serverId = currentAttemptServerId
+		}
+	end
+end)
 
 local function isOnCooldown(serverId)
 	local lastVisit = visitedServers[serverId]
@@ -885,20 +1035,6 @@ local function isOnCooldown(serverId)
 		return false
 	end
 	return (os.time() - lastVisit) < SERVER_COOLDOWN
-end
-
-local function isMarkedFull(serverId)
-	local t = fullServers[serverId]
-	if not t then
-		return false
-	end
-	return (os.time() - t) < FULL_SERVER_COOLDOWN
-end
-
-local function markFull(serverId)
-	if serverId and serverId ~= "" then
-		fullServers[serverId] = os.time()
-	end
 end
 
 local function getServers(cursor)
@@ -910,15 +1046,81 @@ local function getServers(cursor)
 	return HttpService:JSONDecode(game:HttpGet(url))
 end
 
+local function waitForTeleportOutcome(timeoutSeconds)
+	local start = os.clock()
+	while os.clock() - start < timeoutSeconds do
+		if teleportOutcome ~= nil then
+			return teleportOutcome, teleportOutcomeData
+		end
+		task.wait(0.05)
+	end
+	return nil, nil
+end
+
+local function isGameFullResult(result)
+	-- Robust check across environments: compare to enum when possible, otherwise fall back to string match.
+	if typeof(result) == "EnumItem" then
+		return result == Enum.TeleportResult.GameFull
+	end
+	local s = tostring(result)
+	return s:find("GameFull") ~= nil or s:find("Full") ~= nil
+end
+
+local function attemptTeleport(serverId)
+	currentAttemptServerId = serverId
+	teleportOutcome = nil
+	teleportOutcomeData = nil
+
+	local ok, callErr = pcall(function()
+		TeleportService:TeleportToPlaceInstance(placeId, serverId, player)
+	end)
+
+	if not ok then
+		warn("[SERVER HOP] TeleportToPlaceInstance threw:", callErr)
+		unfreezeCharacter()
+		return false, "call_error"
+	end
+
+	-- Wait a bit to catch GameFull / other failures before we give up and try another server
+	local outcome, data = waitForTeleportOutcome(4)
+
+	-- If teleport started, we're done (Roblox will move us)
+	if outcome == "started" then
+		return true, "started"
+	end
+
+	-- If we got a failure, decide what to do
+	if outcome == "failed" then
+		if data and isGameFullResult(data.result) then
+			-- Mark as visited for a short time so we don't immediately try it again
+			visitedServers[serverId] = os.time() - (SERVER_COOLDOWN - FULL_SERVER_COOLDOWN)
+			return false, "full"
+		end
+		-- Other failures: still skip this server for normal cooldown to avoid loops
+		visitedServers[serverId] = os.time()
+		return false, "failed"
+	end
+
+	-- No signal: treat as inconclusive; skip briefly to avoid hammering the same server
+	visitedServers[serverId] = os.time() - (SERVER_COOLDOWN - FULL_SERVER_COOLDOWN)
+	return false, "timeout"
+end
+
 function hopServer()
 	if hopping then
 		return
 	end
 	hopping = true
 
+	-- make sure we always release the lock even if we return early
+	local function finish()
+		hopping = false
+		currentAttemptServerId = nil
+	end
+
 	if os.clock() - lastTeleportAttempt < TELEPORT_COOLDOWN then
 		warn("[SERVER HOP] Teleport cooldown active")
-		hopping = false
+		finish()
 		return
 	end
 
@@ -932,36 +1134,36 @@ function hopServer()
 		end)
 
 		if not success or not data or type(data.data) ~= "table" then
-			warn("[SERVER HOP] Server list unavailable (rate limited?).")
-			hopping = false
+			warn("[SERVER HOP] Server list unavailable (rate limited?). Retrying...")
+			task.wait(2)
+			finish()
 			return
 		end
 
+		-- Build a list of candidates from this page
+		local candidates = {}
 		for _, server in ipairs(data.data) do
-			local openSlots = (server.maxPlayers or 0) - (server.playing or 0)
-
 			if server.id ~= currentJobId
-				and openSlots >= MIN_OPEN_SLOTS
+				and server.playing < server.maxPlayers
 				and not isOnCooldown(server.id)
-				and not isMarkedFull(server.id)
 			then
-				lastTargetServerId = server.id
-				visitedServers[server.id] = os.time()
+				table.insert(candidates, server.id)
+			end
+		end
 
-				local ok, err = pcall(function()
-					TeleportService:TeleportToPlaceInstance(placeId, server.id, player)
-				end)
+		-- Try candidates in order; if one is full (race), move on to the next
+		for _, serverId in ipairs(candidates) do
+			-- mark now to reduce double-attempt spam; full servers get downgraded to short cooldown inside attemptTeleport
+			visitedServers[serverId] = os.time()
 
-				if not ok then
-					warn("[SERVER HOP] Teleport call error:", err)
-					markFull(server.id)
-					lastTargetServerId = nil
-					task.wait(0.25)
-					continue
-				end
-
+			local ok, reason = attemptTeleport(serverId)
+			if ok then
+				-- Teleport started; Roblox will move us
 				return
 			end
+
+			-- Small yield to avoid rapid-fire teleport attempts
+			task.wait(0.15)
 		end
 
 		if not data.nextPageCursor then
@@ -969,62 +1171,13 @@ function hopServer()
 		end
 
 		cursor = data.nextPageCursor
-		task.wait(0.2)
+		task.wait(0.2) -- small yield to avoid rate limits
 	end
 
-	hopping = false
-	warn("[SERVER HOP] No available servers found (outside cooldown/full list)")
+	finish()
+	warn("[SERVER HOP] No available servers found outside cooldown")
 end
 
-TeleportService.TeleportInitFailed:Connect(function(p, result, err)
-	if p ~= Players.LocalPlayer then
-		return
-	end
-
-	warn("[SERVER HOP] Teleport failed:", result, err)
-
-	local char = p.Character
-	if char then
-		for _, v in ipairs(char:GetDescendants()) do
-			if v:IsA("BasePart") then
-				v.Anchored = false
-			end
-		end
-	end
-
-	local r = tostring(result)
-	local shouldRetry =
-		(result == Enum.TeleportResult.GameFull)
-		or (result == Enum.TeleportResult.Flooded)
-		or (result == Enum.TeleportResult.Failure)
-		or (r:lower():find("full", 1, true) ~= nil)
-		or (tostring(err):find("267", 1, true) ~= nil)
-
-	if shouldRetry then
-		if lastTargetServerId then
-			markFull(lastTargetServerId)
-			lastTargetServerId = nil
-		end
-
-		hopping = false
-
-		if hopRetryCount < MAX_HOP_RETRIES then
-			hopRetryCount += 1
-			task.delay(0.4, function()
-				hopServer()
-			end)
-		else
-			warn("[SERVER HOP] Gave up after retries")
-			hopRetryCount = 0
-		end
-
-		return
-	end
-
-	hopping = false
-	hopRetryCount = 0
-	lastTargetServerId = nil
-end)
 
 -- =========================
 -- INPUT BINDS
@@ -1052,6 +1205,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	elseif input.KeyCode == AUTO_TOGGLE_KEY then
 		AUTO_ENABLED = not AUTO_ENABLED
 		print("[AUTO] FULL AUTO CYCLE:", AUTO_ENABLED and "ON" or "OFF")
+		syncConfigFromToggles()
+		saveConfig(CONFIG)
 
 	elseif input.KeyCode == MERCHANT_SCAN_KEY then
 		local ok = merchantScanAndWebhookIfSpecial()
@@ -1061,32 +1216,28 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		local ok = weatherScanAndWebhookIfSpecial()
 		print("[WEATHER SCAN] special weather found:", ok and "YES" or "NO")
 
-	elseif input.KeyCode == TOGGLE_TOKENS_ON_KEY then
-		AUTO_DO_TOKENS = true
-		print("[AUTO] tokens step: ON")
-	elseif input.KeyCode == TOGGLE_TOKENS_OFF_KEY then
-		AUTO_DO_TOKENS = false
-		print("[AUTO] tokens step: OFF")
+	elseif input.KeyCode == TOGGLE_TOKENS_KEY then
+		AUTO_DO_TOKENS = not AUTO_DO_TOKENS
+		print("[AUTO] tokens step:", AUTO_DO_TOKENS and "ON" or "OFF")
+		syncConfigFromToggles()
+		saveConfig(CONFIG)
 
-	elseif input.KeyCode == TOGGLE_MERCHANT_ON_KEY then
-		AUTO_DO_MERCHANT = true
-		print("[AUTO] merchant step: ON")
-	elseif input.KeyCode == TOGGLE_MERCHANT_OFF_KEY then
-		AUTO_DO_MERCHANT = false
-		print("[AUTO] merchant step: OFF")
+	elseif input.KeyCode == TOGGLE_MERCHANT_KEY then
+		AUTO_DO_MERCHANT = not AUTO_DO_MERCHANT
+		print("[AUTO] merchant step:", AUTO_DO_MERCHANT and "ON" or "OFF")
+		syncConfigFromToggles()
+		saveConfig(CONFIG)
 
-	elseif input.KeyCode == TOGGLE_WEATHER_ON_KEY then
-		AUTO_DO_WEATHER = true
-		print("[AUTO] weather step: ON")
-	elseif input.KeyCode == TOGGLE_WEATHER_OFF_KEY then
-		AUTO_DO_WEATHER = false
-		print("[AUTO] weather step: OFF")
+	elseif input.KeyCode == TOGGLE_WEATHER_KEY then
+		AUTO_DO_WEATHER = not AUTO_DO_WEATHER
+		print("[AUTO] weather step:", AUTO_DO_WEATHER and "ON" or "OFF")
+		syncConfigFromToggles()
+		saveConfig(CONFIG)
 
-	elseif input.KeyCode == TOGGLE_HOP_ON_KEY then
-		AUTO_DO_HOP = true
-		print("[AUTO] hop step: ON")
-	elseif input.KeyCode == TOGGLE_HOP_OFF_KEY then
-		AUTO_DO_HOP = false
-		print("[AUTO] hop step: OFF")
+	elseif input.KeyCode == TOGGLE_HOP_KEY then
+		AUTO_DO_HOP = not AUTO_DO_HOP
+		print("[AUTO] hop step:", AUTO_DO_HOP and "ON" or "OFF")
+		syncConfigFromToggles()
+		saveConfig(CONFIG)
 	end
 end)
