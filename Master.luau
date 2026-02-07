@@ -1,5 +1,5 @@
 -- Travel Tokens + Merchant Teleport (Minimal)
--- E = Teleport to TravelToken1, then 1s later TravelToken2 (if they exist)
+-- v = Teleport to TravelToken1, then 1s later TravelToken2 (if they exist)
 -- Q = Teleport to travelling merchant (if not found, prints "no merchant")
 -- Auto-teleport: when TravelToken1/2 timer hits 0, teleport to that token
 -- J = Manually send webhook (includes weather + merchant selling list / selling nothing)
@@ -24,7 +24,7 @@ local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
 local MERCHANT_TELEPORT_KEY = Enum.KeyCode.Q
-local TOKEN_TELEPORT_KEY = Enum.KeyCode.E
+local TOKEN_TELEPORT_KEY = Enum.KeyCode.V
 local WEBHOOK_KEY = Enum.KeyCode.J
 local SERVER_HOP_KEY = Enum.KeyCode.H
 
@@ -321,6 +321,29 @@ local function sendDiscordWebhook(embedTitle, embedDescription, merchantName, me
 end
 
 -- =========================
+-- ONE-SHOT EVENT STATE (PREVENT SPAM + SEND END)
+-- =========================
+
+local WEATHER_EVENT_ACTIVE = false
+local WEATHER_EVENT_SIGNATURE = ""
+local WEATHER_EVENT_LAST_ALL = ""
+
+local MERCHANT_EVENT_ACTIVE = false
+local MERCHANT_EVENT_SIGNATURE = ""
+local MERCHANT_EVENT_LAST_NAME = "No merchant found"
+
+local function buildSignatureFromList(list, sep)
+	local tmp = {}
+	for _, v in ipairs(list or {}) do
+		table.insert(tmp, tostring(v))
+	end
+	table.sort(tmp, function(a, b)
+		return a < b
+	end)
+	return table.concat(tmp, sep or ", ")
+end
+
+-- =========================
 -- CHARACTER / COMMON HELPERS
 -- =========================
 
@@ -571,53 +594,148 @@ local function getMatchedMerchantSpecials(sellingLines)
 	return matched
 end
 
-local function merchantScanAndWebhookIfSpecial()
+-- =========================
+-- MERCHANT EVENT (ONE-SHOT START/END)
+-- =========================
+
+local function merchantScanAndWebhookIfSpecial(forceSend)
 	local merchant = findTravellingMerchant()
+
 	if not merchant then
+		if MERCHANT_EVENT_ACTIVE then
+			local desc =
+				"Merchant special ended (merchant not found).\n" ..
+				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+			sendDiscordWebhook("Merchant special ended", desc, MERCHANT_EVENT_LAST_NAME, {}, false)
+			MERCHANT_EVENT_ACTIVE = false
+			MERCHANT_EVENT_SIGNATURE = ""
+			MERCHANT_EVENT_LAST_NAME = "No merchant found"
+			return true
+		end
 		return false
 	end
+
+	local merchantName = merchant.Name or "Travelling Merchant"
+	MERCHANT_EVENT_LAST_NAME = merchantName
 
 	teleportNearModelOnGround(merchant, 10)
 
 	local selling = waitForMerchantItems(2.5)
 	if #selling <= 0 then
+		if MERCHANT_EVENT_ACTIVE then
+			local desc =
+				"Merchant special ended (shop empty / not loaded).\n" ..
+				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+			sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
+			MERCHANT_EVENT_ACTIVE = false
+			MERCHANT_EVENT_SIGNATURE = ""
+			return true
+		end
 		return false
 	end
 
 	local matched = getMatchedMerchantSpecials(selling)
+	local signature = buildSignatureFromList(matched, "\n")
+
 	if #matched <= 0 then
+		if MERCHANT_EVENT_ACTIVE then
+			local desc =
+				"Merchant special ended.\n" ..
+				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+			sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
+			MERCHANT_EVENT_ACTIVE = false
+			MERCHANT_EVENT_SIGNATURE = ""
+			return true
+		end
 		return false
 	end
 
-	local weatherNames = getActiveWeatherNames()
-	local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+	if forceSend then
+		local weatherNames = getActiveWeatherNames()
+		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+		local desc =
+			"Special merchant item(s) detected:\n" ..
+			"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
+			"\n\n**Current Weather:** " .. weatherText
 
-	local merchantName = merchant and merchant.Name or "No merchant found"
-	local desc =
-		"Special merchant item(s) detected (treat as weather signal):\n" ..
-		"**Matches:**\n" .. clampDiscordFieldValue(table.concat(matched, "\n")) ..
-		"\n\n**Current Weather:** " .. weatherText
+		sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
+		MERCHANT_EVENT_ACTIVE = true
+		MERCHANT_EVENT_SIGNATURE = signature
+		return true
+	end
 
-	sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
-	return true
+	if (not MERCHANT_EVENT_ACTIVE) then
+		local weatherNames = getActiveWeatherNames()
+		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+		local desc =
+			"Special merchant item(s) detected:\n" ..
+			"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
+			"\n\n**Current Weather:** " .. weatherText
+
+		sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
+		MERCHANT_EVENT_ACTIVE = true
+		MERCHANT_EVENT_SIGNATURE = signature
+		return true
+	end
+
+	if MERCHANT_EVENT_SIGNATURE ~= signature then
+		-- Only send again if the special list actually changed (prevents spam every cycle)
+		local weatherNames = getActiveWeatherNames()
+		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+		local desc =
+			"Merchant special changed:\n" ..
+			"**New matches:**\n" .. clampDiscordFieldValue(signature) ..
+			"\n\n**Current Weather:** " .. weatherText
+
+		sendDiscordWebhook("Merchant special changed", desc, merchantName, selling, false)
+		MERCHANT_EVENT_SIGNATURE = signature
+		return true
+	end
+
+	return false
 end
 
-local function weatherScanAndWebhookIfSpecial()
-	local weatherNames = getActiveWeatherNames()
-	if #weatherNames <= 0 then
-		return false
-	end
+-- =========================
+-- WEATHER EVENT (ONE-SHOT START/END)
+-- =========================
 
-	local foundSpecial = false
+local function weatherScanAndWebhookIfSpecial(forceSend)
+	local weatherNames = getActiveWeatherNames()
+	local allSignature = buildSignatureFromList(weatherNames, ", ")
+	WEATHER_EVENT_LAST_ALL = allSignature
+
 	local specialNames = {}
 	for _, w in ipairs(weatherNames) do
 		if strContainsAny(w, SPECIAL_WEATHER_KEYWORDS) then
-			foundSpecial = true
 			table.insert(specialNames, w)
 		end
 	end
 
-	if not foundSpecial then
+	local specialSignature = buildSignatureFromList(specialNames, ", ")
+	local isSpecialActive = (#specialNames > 0)
+
+	if not isSpecialActive then
+		if WEATHER_EVENT_ACTIVE then
+			local merchant = findTravellingMerchant()
+			local merchantName = (merchant and merchant.Name) or MERCHANT_EVENT_LAST_NAME or "No merchant found"
+
+			local selling = {}
+			if merchant then
+				teleportNearModelOnGround(merchant, 10)
+				selling = waitForMerchantItems(2.0)
+			end
+
+			local desc =
+				"Special weather ended.\n" ..
+				"**Previous special:** " .. (WEATHER_EVENT_SIGNATURE ~= "" and WEATHER_EVENT_SIGNATURE or "Unknown") ..
+				"\n**Weather now:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+			sendDiscordWebhook("SPECIAL WEATHER ENDED", desc, merchantName, selling, false)
+
+			WEATHER_EVENT_ACTIVE = false
+			WEATHER_EVENT_SIGNATURE = ""
+			return true
+		end
 		return false
 	end
 
@@ -630,12 +748,42 @@ local function weatherScanAndWebhookIfSpecial()
 		selling = waitForMerchantItems(2.0)
 	end
 
-	local desc =
-		"**Special weather detected:** " .. table.concat(specialNames, ", ") ..
-		"\n**All weather:** " .. table.concat(weatherNames, ", ")
+	if forceSend then
+		local desc =
+			"**Special weather detected:** " .. specialSignature ..
+			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
 
-	sendDiscordWebhook("SPECIAL WEATHER", desc, merchantName, selling, true)
-	return true
+		sendDiscordWebhook("SPECIAL WEATHER", desc, merchantName, selling, true)
+
+		WEATHER_EVENT_ACTIVE = true
+		WEATHER_EVENT_SIGNATURE = specialSignature
+		return true
+	end
+
+	if not WEATHER_EVENT_ACTIVE then
+		local desc =
+			"**Special weather started:** " .. specialSignature ..
+			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+		sendDiscordWebhook("SPECIAL WEATHER STARTED", desc, merchantName, selling, true)
+
+		WEATHER_EVENT_ACTIVE = true
+		WEATHER_EVENT_SIGNATURE = specialSignature
+		return true
+	end
+
+	if WEATHER_EVENT_SIGNATURE ~= specialSignature then
+		local desc =
+			"**Special weather changed:** " .. specialSignature ..
+			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+		sendDiscordWebhook("SPECIAL WEATHER CHANGED", desc, merchantName, selling, true)
+
+		WEATHER_EVENT_SIGNATURE = specialSignature
+		return true
+	end
+
+	return false
 end
 
 -- =========================
@@ -927,20 +1075,62 @@ local function tryPickupReadyTokensInOrder()
 	return didAnything
 end
 
+local function flushActiveEventEndNotifications(reason)
+	reason = tostring(reason or "Unknown")
+	local sentAny = false
+
+	if MERCHANT_EVENT_ACTIVE then
+		local desc =
+			"Merchant special ended (" .. reason .. ").\n" ..
+			"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+		sendDiscordWebhook("Merchant special ended", desc, MERCHANT_EVENT_LAST_NAME, {}, false)
+		MERCHANT_EVENT_ACTIVE = false
+		MERCHANT_EVENT_SIGNATURE = ""
+		sentAny = true
+	end
+
+	if WEATHER_EVENT_ACTIVE then
+		local merchant = findTravellingMerchant()
+		local merchantName = (merchant and merchant.Name) or MERCHANT_EVENT_LAST_NAME or "No merchant found"
+
+		local selling = {}
+		if merchant then
+			teleportNearModelOnGround(merchant, 10)
+			selling = waitForMerchantItems(2.0)
+		end
+
+		local desc =
+			"Special weather ended (" .. reason .. ").\n" ..
+			"**Previous special:** " .. (WEATHER_EVENT_SIGNATURE ~= "" and WEATHER_EVENT_SIGNATURE or "Unknown") ..
+			"\n**Last seen weather:** " .. ((WEATHER_EVENT_LAST_ALL ~= "" and WEATHER_EVENT_LAST_ALL) or "Unknown")
+
+		sendDiscordWebhook("SPECIAL WEATHER ENDED", desc, merchantName, selling, false)
+
+		WEATHER_EVENT_ACTIVE = false
+		WEATHER_EVENT_SIGNATURE = ""
+		sentAny = true
+	end
+
+	return sentAny
+end
+
 local function runFullAutoCycleOnce()
 	if AUTO_DO_TOKENS then
 		tryPickupReadyTokensInOrder()
 	end
 
 	if AUTO_DO_MERCHANT then
-		merchantScanAndWebhookIfSpecial()
+		merchantScanAndWebhookIfSpecial(false)
 	end
 
 	if AUTO_DO_WEATHER then
-		weatherScanAndWebhookIfSpecial()
+		weatherScanAndWebhookIfSpecial(false)
 	end
 
 	if AUTO_DO_HOP then
+		-- Prevent missing "ended" notifications when you leave the server
+		flushActiveEventEndNotifications("server hop")
+
 		print("[SERVER HOP] Attempting to hop servers...")
 		hopRetryCount = 0
 		hopServer()
@@ -978,7 +1168,7 @@ local SERVER_COOLDOWN = 10 * 60
 local FULL_SERVER_COOLDOWN = 30
 
 -- table to track visited servers
--- [serverId] = lastVisitUnixTime
+-- [serverId] flushActiveEventEndNotifications= lastVisitUnixTime
 local visitedServers = visitedServers or {}
 
 -- mark current server as visited
@@ -1198,6 +1388,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		sendWeatherWebhook()
 
 	elseif input.KeyCode == SERVER_HOP_KEY then
+		-- If you manually hop, also flush end notifications so you don't miss them.
+		flushActiveEventEndNotifications("manual hop")
+
 		print("[SERVER HOP] Attempting to hop servers...")
 		hopRetryCount = 0
 		hopServer()
@@ -1209,11 +1402,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		saveConfig(CONFIG)
 
 	elseif input.KeyCode == MERCHANT_SCAN_KEY then
-		local ok = merchantScanAndWebhookIfSpecial()
+		local ok = merchantScanAndWebhookIfSpecial(true)
 		print("[MERCHANT SCAN] special found:", ok and "YES" or "NO")
 
 	elseif input.KeyCode == WEATHER_SCAN_KEY then
-		local ok = weatherScanAndWebhookIfSpecial()
+		local ok = weatherScanAndWebhookIfSpecial(true)
 		print("[WEATHER SCAN] special weather found:", ok and "YES" or "NO")
 
 	elseif input.KeyCode == TOGGLE_TOKENS_KEY then
