@@ -1166,6 +1166,10 @@ local SERVER_COOLDOWN = 10 * 60
 
 -- extra short cooldown for servers that were full (race condition)
 local FULL_SERVER_COOLDOWN = 30
+local SERVER_LIST_RETRY_MAX = 5
+local SERVER_LIST_RETRY_DELAY_START = 0.25
+local SERVER_LIST_RETRY_DELAY_MAX = 1.0
+local SERVER_LIST_RETRY_JITTER_MAX = 0.15
 
 -- table to track visited servers
 -- [serverId] flushActiveEventEndNotifications= lastVisitUnixTime
@@ -1319,13 +1323,35 @@ function hopServer()
 	local cursor = nil
 
 	while true do
-		local success, data = pcall(function()
-			return getServers(cursor)
-		end)
+		local success = false
+		local data = nil
+
+		local delay = SERVER_LIST_RETRY_DELAY_START
+
+		for attempt = 1, SERVER_LIST_RETRY_MAX do
+			success, data = pcall(function()
+				return getServers(cursor)
+			end)
+
+			if success and data and type(data.data) == "table" then
+				break
+			end
+
+			if attempt < SERVER_LIST_RETRY_MAX then
+				local jitter = (math.random() * SERVER_LIST_RETRY_JITTER_MAX)
+				warn(string.format(
+					"[SERVER HOP] Server list unavailable (rate limited?). Retry %d/%d in %.2fs...",
+					attempt,
+					SERVER_LIST_RETRY_MAX,
+					delay + jitter
+				))
+				task.wait(delay + jitter)
+				delay = math.min(delay * 2, SERVER_LIST_RETRY_DELAY_MAX)
+			end
+		end
 
 		if not success or not data or type(data.data) ~= "table" then
-			warn("[SERVER HOP] Server list unavailable (rate limited?). Retrying...")
-			task.wait(2)
+			warn("[SERVER HOP] Server list unavailable after retries. Aborting hop.")
 			finish()
 			return
 		end
