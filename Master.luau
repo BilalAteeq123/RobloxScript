@@ -339,6 +339,62 @@ local function sendDiscordWebhook(embedTitle, embedDescription, merchantName, me
 end
 
 -- =========================
+-- WEBHOOK DE-DUPE + SCAN LOCKS
+-- =========================
+
+local WEBHOOK_DEDUPE_SECONDS = 3
+local _lastWebhookKey = nil
+local _lastWebhookAt = 0
+
+local function isDuplicateWebhook(key)
+	if not key then
+		return false
+	end
+	local now = os.clock()
+	if _lastWebhookKey == key and (now - _lastWebhookAt) < WEBHOOK_DEDUPE_SECONDS then
+		return true
+	end
+	_lastWebhookKey = key
+	_lastWebhookAt = now
+	return false
+end
+
+local function sendDiscordWebhookDeduped(dedupeKey, embedTitle, embedDescription, merchantName, merchantLines, mentionEveryone)
+	if isDuplicateWebhook(dedupeKey) then
+		print("[WEBHOOK] deduped:", dedupeKey)
+		return false
+	end
+	return sendDiscordWebhook(embedTitle, embedDescription, merchantName, merchantLines, mentionEveryone)
+end
+
+local WEATHER_SCAN_BUSY = false
+local MERCHANT_SCAN_BUSY = false
+
+local function getStableWeatherSnapshot(maxTries, waitBetween)
+	maxTries = maxTries or 4
+	waitBetween = waitBetween or 0.25
+
+	local lastSig = nil
+	local lastNames = nil
+
+	for _ = 1, maxTries do
+		local names = getActiveWeatherNames()
+		local sig = buildSignatureFromList(names, ", ")
+
+		if sig == lastSig then
+			return names, sig
+		end
+
+		lastSig = sig
+		lastNames = names
+		task.wait(waitBetween)
+	end
+
+	-- return best effort (latest read)
+	return lastNames or {}, lastSig or ""
+end
+
+-- =========================
 -- ONE-SHOT EVENT STATE (PREVENT SPAM + SEND END)
 -- =========================
 
@@ -617,192 +673,232 @@ end
 -- =========================
 
 local function merchantScanAndWebhookIfSpecial(forceSend)
-	local merchant = findTravellingMerchant()
-
-	if not merchant then
-		if MERCHANT_EVENT_ACTIVE then
-			local desc =
-				"Merchant special ended (merchant not found).\n" ..
-				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
-			sendDiscordWebhook("Merchant special ended", desc, MERCHANT_EVENT_LAST_NAME, {}, false)
-			MERCHANT_EVENT_ACTIVE = false
-			MERCHANT_EVENT_SIGNATURE = ""
-			MERCHANT_EVENT_LAST_NAME = "No merchant found"
-			return true
-		end
+	if MERCHANT_SCAN_BUSY then
 		return false
 	end
+	MERCHANT_SCAN_BUSY = true
 
-	local merchantName = merchant.Name or "Travelling Merchant"
-	MERCHANT_EVENT_LAST_NAME = merchantName
+	local didSend = false
 
-	teleportNearModelOnGround(merchant, 10)
+	local ok, err = pcall(function()
+		local merchant = findTravellingMerchant()
 
-	local selling = waitForMerchantItems(2.5)
-	if #selling <= 0 then
-		if MERCHANT_EVENT_ACTIVE then
-			local desc =
-				"Merchant special ended (shop empty / not loaded).\n" ..
-				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
-			sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
-			MERCHANT_EVENT_ACTIVE = false
-			MERCHANT_EVENT_SIGNATURE = ""
-			return true
+		if not merchant then
+			if MERCHANT_EVENT_ACTIVE then
+				local desc =
+					"Merchant special ended (merchant not found).\n" ..
+					"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+				sendDiscordWebhook("Merchant special ended", desc, MERCHANT_EVENT_LAST_NAME, {}, false)
+				MERCHANT_EVENT_ACTIVE = false
+				MERCHANT_EVENT_SIGNATURE = ""
+				MERCHANT_EVENT_LAST_NAME = "No merchant found"
+				didSend = true
+			end
+			return
 		end
-		return false
-	end
 
-	local matched = getMatchedMerchantSpecials(selling)
-	local signature = buildSignatureFromList(matched, "\n")
+		local merchantName = merchant.Name or "Travelling Merchant"
+		MERCHANT_EVENT_LAST_NAME = merchantName
 
-	if #matched <= 0 then
-		if MERCHANT_EVENT_ACTIVE then
-			local desc =
-				"Merchant special ended.\n" ..
-				"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
-			sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
-			MERCHANT_EVENT_ACTIVE = false
-			MERCHANT_EVENT_SIGNATURE = ""
-			return true
+		teleportNearModelOnGround(merchant, 10)
+
+		local selling = waitForMerchantItems(2.5)
+		if #selling <= 0 then
+			if MERCHANT_EVENT_ACTIVE then
+				local desc =
+					"Merchant special ended (shop empty / not loaded).\n" ..
+					"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+				sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
+				MERCHANT_EVENT_ACTIVE = false
+				MERCHANT_EVENT_SIGNATURE = ""
+				didSend = true
+			end
+			return
 		end
-		return false
+
+		local matched = getMatchedMerchantSpecials(selling)
+		local signature = buildSignatureFromList(matched, "\n")
+
+		if #matched <= 0 then
+			if MERCHANT_EVENT_ACTIVE then
+				local desc =
+					"Merchant special ended.\n" ..
+					"**Previous matches:**\n" .. (MERCHANT_EVENT_SIGNATURE ~= "" and MERCHANT_EVENT_SIGNATURE or "Unknown")
+				sendDiscordWebhook("Merchant special ended", desc, merchantName, selling, false)
+				MERCHANT_EVENT_ACTIVE = false
+				MERCHANT_EVENT_SIGNATURE = ""
+				didSend = true
+			end
+			return
+		end
+
+		if forceSend then
+			local weatherNames = getActiveWeatherNames()
+			local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+			local desc =
+				"Special merchant item(s) detected:\n" ..
+				"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
+				"\n\n**Current Weather:** " .. weatherText
+
+			sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
+			MERCHANT_EVENT_ACTIVE = true
+			MERCHANT_EVENT_SIGNATURE = signature
+			didSend = true
+			return
+		end
+
+		if (not MERCHANT_EVENT_ACTIVE) then
+			local weatherNames = getActiveWeatherNames()
+			local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+			local desc =
+				"Special merchant item(s) detected:\n" ..
+				"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
+				"\n\n**Current Weather:** " .. weatherText
+
+			sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
+			MERCHANT_EVENT_ACTIVE = true
+			MERCHANT_EVENT_SIGNATURE = signature
+			didSend = true
+			return
+		end
+
+		if MERCHANT_EVENT_SIGNATURE ~= signature then
+			local weatherNames = getActiveWeatherNames()
+			local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
+			local desc =
+				"Merchant special changed:\n" ..
+				"**New matches:**\n" .. clampDiscordFieldValue(signature) ..
+				"\n\n**Current Weather:** " .. weatherText
+
+			sendDiscordWebhook("Merchant special changed", desc, merchantName, selling, false)
+			MERCHANT_EVENT_SIGNATURE = signature
+			didSend = true
+			return
+		end
+	end)
+
+	MERCHANT_SCAN_BUSY = false
+
+	if not ok then
+		warn("[MERCHANT SCAN] error:", err)
 	end
 
-	if forceSend then
-		local weatherNames = getActiveWeatherNames()
-		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
-		local desc =
-			"Special merchant item(s) detected:\n" ..
-			"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
-			"\n\n**Current Weather:** " .. weatherText
-
-		sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
-		MERCHANT_EVENT_ACTIVE = true
-		MERCHANT_EVENT_SIGNATURE = signature
-		return true
-	end
-
-	if (not MERCHANT_EVENT_ACTIVE) then
-		local weatherNames = getActiveWeatherNames()
-		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
-		local desc =
-			"Special merchant item(s) detected:\n" ..
-			"**Matches:**\n" .. clampDiscordFieldValue(signature) ..
-			"\n\n**Current Weather:** " .. weatherText
-
-		sendDiscordWebhook("Merchant special detected", desc, merchantName, selling, false)
-		MERCHANT_EVENT_ACTIVE = true
-		MERCHANT_EVENT_SIGNATURE = signature
-		return true
-	end
-
-	if MERCHANT_EVENT_SIGNATURE ~= signature then
-		-- Only send again if the special list actually changed (prevents spam every cycle)
-		local weatherNames = getActiveWeatherNames()
-		local weatherText = (#weatherNames > 0) and table.concat(weatherNames, ", ") or "No active weather"
-		local desc =
-			"Merchant special changed:\n" ..
-			"**New matches:**\n" .. clampDiscordFieldValue(signature) ..
-			"\n\n**Current Weather:** " .. weatherText
-
-		sendDiscordWebhook("Merchant special changed", desc, merchantName, selling, false)
-		MERCHANT_EVENT_SIGNATURE = signature
-		return true
-	end
-
-	return false
+	return didSend
 end
+
 
 -- =========================
 -- WEATHER EVENT (ONE-SHOT START/END)
 -- =========================
 
 local function weatherScanAndWebhookIfSpecial(forceSend)
-	local weatherNames = getActiveWeatherNames()
-	local allSignature = buildSignatureFromList(weatherNames, ", ")
-	WEATHER_EVENT_LAST_ALL = allSignature
-
-	local specialNames = {}
-	for _, w in ipairs(weatherNames) do
-		if strContainsAny(w, SPECIAL_WEATHER_KEYWORDS) then
-			table.insert(specialNames, w)
-		end
-	end
-
-	local specialSignature = buildSignatureFromList(specialNames, ", ")
-	local isSpecialActive = (#specialNames > 0)
-
-	if not isSpecialActive then
-		if WEATHER_EVENT_ACTIVE then
-			local merchant = findTravellingMerchant()
-			local merchantName = (merchant and merchant.Name) or MERCHANT_EVENT_LAST_NAME or "No merchant found"
-
-			local selling = {}
-			if merchant then
-				teleportNearModelOnGround(merchant, 10)
-				selling = waitForMerchantItems(2.0)
-			end
-
-			local desc =
-				"Special weather ended.\n" ..
-				"**Previous special:** " .. (WEATHER_EVENT_SIGNATURE ~= "" and WEATHER_EVENT_SIGNATURE or "Unknown") ..
-				"\n**Weather now:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
-
-			sendDiscordWebhook("SPECIAL WEATHER ENDED", desc, merchantName, selling, false)
-
-			WEATHER_EVENT_ACTIVE = false
-			WEATHER_EVENT_SIGNATURE = ""
-			return true
-		end
+	if WEATHER_SCAN_BUSY then
 		return false
 	end
+	WEATHER_SCAN_BUSY = true
 
-	local merchant = findTravellingMerchant()
-	local merchantName = merchant and merchant.Name or "No merchant found"
+	local didSend = false
+	local ok, err = pcall(function()
+		-- Stabilize: prevents "started -> changed -> changed" spam while VFX children are still populating
+		local weatherNames, allSignature = getStableWeatherSnapshot(4, 0.25)
+		WEATHER_EVENT_LAST_ALL = allSignature
 
-	local selling = {}
-	if merchant then
-		teleportNearModelOnGround(merchant, 10)
-		selling = waitForMerchantItems(2.0)
+		local specialNames = {}
+		for _, w in ipairs(weatherNames) do
+			if strContainsAny(w, SPECIAL_WEATHER_KEYWORDS) then
+				table.insert(specialNames, w)
+			end
+		end
+
+		local specialSignature = buildSignatureFromList(specialNames, ", ")
+		local isSpecialActive = (#specialNames > 0)
+
+		if not isSpecialActive then
+			if WEATHER_EVENT_ACTIVE then
+				local merchant = findTravellingMerchant()
+				local merchantName = (merchant and merchant.Name) or MERCHANT_EVENT_LAST_NAME or "No merchant found"
+
+				local selling = {}
+				if merchant then
+					teleportNearModelOnGround(merchant, 10)
+					selling = waitForMerchantItems(2.0)
+				end
+
+				local desc =
+					"Special weather ended.\n" ..
+					"**Previous special:** " .. (WEATHER_EVENT_SIGNATURE ~= "" and WEATHER_EVENT_SIGNATURE or "Unknown") ..
+					"\n**Weather now:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+				local key = "weather|ended|" .. tostring(WEATHER_EVENT_SIGNATURE) .. "|" .. tostring(allSignature)
+				sendDiscordWebhookDeduped(key, "SPECIAL WEATHER ENDED", desc, merchantName, selling, false)
+
+				WEATHER_EVENT_ACTIVE = false
+				WEATHER_EVENT_SIGNATURE = ""
+				didSend = true
+			end
+			return
+		end
+
+		local merchant = findTravellingMerchant()
+		local merchantName = merchant and merchant.Name or "No merchant found"
+
+		local selling = {}
+		if merchant then
+			teleportNearModelOnGround(merchant, 10)
+			selling = waitForMerchantItems(2.0)
+		end
+
+		if forceSend then
+			local desc =
+				"**Special weather detected:** " .. specialSignature ..
+				"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+			local key = "weather|force|" .. tostring(specialSignature) .. "|" .. tostring(allSignature)
+			sendDiscordWebhookDeduped(key, "SPECIAL WEATHER", desc, merchantName, selling, true)
+
+			WEATHER_EVENT_ACTIVE = true
+			WEATHER_EVENT_SIGNATURE = specialSignature
+			didSend = true
+			return
+		end
+
+		if not WEATHER_EVENT_ACTIVE then
+			local desc =
+				"**Special weather started:** " .. specialSignature ..
+				"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+			local key = "weather|started|" .. tostring(specialSignature) .. "|" .. tostring(allSignature)
+			sendDiscordWebhookDeduped(key, "SPECIAL WEATHER STARTED", desc, merchantName, selling, true)
+
+			WEATHER_EVENT_ACTIVE = true
+			WEATHER_EVENT_SIGNATURE = specialSignature
+			didSend = true
+			return
+		end
+
+		if WEATHER_EVENT_SIGNATURE ~= specialSignature then
+			local desc =
+				"**Special weather changed:** " .. specialSignature ..
+				"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
+
+			local key = "weather|changed|" .. tostring(specialSignature) .. "|" .. tostring(allSignature)
+			sendDiscordWebhookDeduped(key, "SPECIAL WEATHER CHANGED", desc, merchantName, selling, true)
+
+			WEATHER_EVENT_SIGNATURE = specialSignature
+			didSend = true
+			return
+		end
+	end)
+
+	WEATHER_SCAN_BUSY = false
+
+	if not ok then
+		warn("[WEATHER SCAN] error:", err)
 	end
 
-	if forceSend then
-		local desc =
-			"**Special weather detected:** " .. specialSignature ..
-			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
-
-		sendDiscordWebhook("SPECIAL WEATHER", desc, merchantName, selling, true)
-
-		WEATHER_EVENT_ACTIVE = true
-		WEATHER_EVENT_SIGNATURE = specialSignature
-		return true
-	end
-
-	if not WEATHER_EVENT_ACTIVE then
-		local desc =
-			"**Special weather started:** " .. specialSignature ..
-			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
-
-		sendDiscordWebhook("SPECIAL WEATHER STARTED", desc, merchantName, selling, true)
-
-		WEATHER_EVENT_ACTIVE = true
-		WEATHER_EVENT_SIGNATURE = specialSignature
-		return true
-	end
-
-	if WEATHER_EVENT_SIGNATURE ~= specialSignature then
-		local desc =
-			"**Special weather changed:** " .. specialSignature ..
-			"\n**All weather:** " .. ((allSignature ~= "" and allSignature) or "No active weather")
-
-		sendDiscordWebhook("SPECIAL WEATHER CHANGED", desc, merchantName, selling, true)
-
-		WEATHER_EVENT_SIGNATURE = specialSignature
-		return true
-	end
-
-	return false
+	return didSend
 end
+
 
 -- =========================
 -- WEBHOOK SENDER (MANUAL KEY ONLY)
