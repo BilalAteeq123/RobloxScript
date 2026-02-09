@@ -26,6 +26,46 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
+-- =========================
+-- SAFE SHUTDOWN SYSTEM (EXECUTOR STABILITY)
+-- =========================
+
+if _G.TRAVEL_SCRIPT_RUNNING then
+	return
+end
+_G.TRAVEL_SCRIPT_RUNNING = true
+
+local SCRIPT_SHUTTING_DOWN = false
+local CONNECTIONS = {}
+
+local function track(conn)
+	if conn then
+		table.insert(CONNECTIONS, conn)
+	end
+	return conn
+end
+
+local function shutdownScript()
+	if SCRIPT_SHUTTING_DOWN then
+		return
+	end
+	SCRIPT_SHUTTING_DOWN = true
+
+	AUTO_ENABLED = false
+
+	for _, c in ipairs(CONNECTIONS) do
+		pcall(function()
+			c:Disconnect()
+		end)
+	end
+
+	CONNECTIONS = {}
+
+	task.wait(0.25) -- critical: lets executor detach teleport hooks
+
+	_G.TRAVEL_SCRIPT_RUNNING = false
+end
+
 local player = Players.LocalPlayer
 if not player then
 	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
@@ -367,6 +407,29 @@ local function sendDiscordWebhookDeduped(dedupeKey, embedTitle, embedDescription
 	return sendDiscordWebhook(embedTitle, embedDescription, merchantName, merchantLines, mentionEveryone)
 end
 
+-- =========================
+-- ONE-SHOT EVENT STATE (PREVENT SPAM + SEND END)
+-- =========================
+
+local WEATHER_EVENT_ACTIVE = false
+local WEATHER_EVENT_SIGNATURE = ""
+local WEATHER_EVENT_LAST_ALL = ""
+
+local MERCHANT_EVENT_ACTIVE = false
+local MERCHANT_EVENT_SIGNATURE = ""
+local MERCHANT_EVENT_LAST_NAME = "No merchant found"
+
+local function buildSignatureFromList(list, sep)
+	local tmp = {}
+	for _, v in ipairs(list or {}) do
+		table.insert(tmp, tostring(v))
+	end
+	table.sort(tmp, function(a, b)
+		return a < b
+	end)
+	return table.concat(tmp, sep or ", ")
+end
+
 local WEATHER_SCAN_BUSY = false
 local MERCHANT_SCAN_BUSY = false
 
@@ -395,29 +458,6 @@ local function getStableWeatherSnapshot(maxTries, waitBetween)
 end
 
 -- =========================
--- ONE-SHOT EVENT STATE (PREVENT SPAM + SEND END)
--- =========================
-
-local WEATHER_EVENT_ACTIVE = false
-local WEATHER_EVENT_SIGNATURE = ""
-local WEATHER_EVENT_LAST_ALL = ""
-
-local MERCHANT_EVENT_ACTIVE = false
-local MERCHANT_EVENT_SIGNATURE = ""
-local MERCHANT_EVENT_LAST_NAME = "No merchant found"
-
-local function buildSignatureFromList(list, sep)
-	local tmp = {}
-	for _, v in ipairs(list or {}) do
-		table.insert(tmp, tostring(v))
-	end
-	table.sort(tmp, function(a, b)
-		return a < b
-	end)
-	return table.concat(tmp, sep or ", ")
-end
-
--- =========================
 -- CHARACTER / COMMON HELPERS
 -- =========================
 
@@ -426,7 +466,7 @@ local function bindCharacter(newCharacter)
 	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 end
 
-player.CharacterAdded:Connect(bindCharacter)
+track(player.CharacterAdded:Connect(bindCharacter))
 
 local function ensureHumanoidRootPart()
 	if not character or not character.Parent then
@@ -1157,7 +1197,7 @@ local function watchParkourTimer(tokenName, timerName)
 end
 
 task.spawn(function()
-	while true do
+	while not SCRIPT_SHUTTING_DOWN do
 		for _, info in ipairs(WATCHED_TOKENS) do
 			if timerConnections[info.timerName] ~= "no_label" then
 				watchParkourTimer(info.tokenName, info.timerName)
@@ -1246,13 +1286,14 @@ local function runFullAutoCycleOnce()
 		flushActiveEventEndNotifications("server hop")
 
 		print("[SERVER HOP] Attempting to hop servers...")
+		shutdownScript()
 		hopRetryCount = 0
 		hopServer()
 	end
 end
 
 task.spawn(function()
-	while true do
+	while not SCRIPT_SHUTTING_DOWN do
 		if AUTO_ENABLED then
 			local now = os.clock()
 			if (now - lastAutoCycleAt) >= AUTO_CYCLE_COOLDOWN then
@@ -1310,7 +1351,7 @@ local function unfreezeCharacter()
 	end
 end
 
-TeleportService.TeleportInitFailed:Connect(function(p, result, err)
+track(TeleportService.TeleportInitFailed:Connect(function(p, result, err)
 	if p ~= Players.LocalPlayer then
 		return
 	end
@@ -1327,7 +1368,7 @@ TeleportService.TeleportInitFailed:Connect(function(p, result, err)
 	}
 end)
 
-player.OnTeleport:Connect(function(state)
+track(player.OnTeleport:Connect(function(state)
 	-- If we reach "Started", Roblox is taking over and this hop "succeeded" (we'll leave the server)
 	if state == Enum.TeleportState.Started then
 		teleportOutcome = "started"
@@ -1514,7 +1555,7 @@ end
 -- INPUT BINDS
 -- =========================
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
 		return
 	end
@@ -1533,6 +1574,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		flushActiveEventEndNotifications("manual hop")
 
 		print("[SERVER HOP] Attempting to hop servers...")
+		shutdownScript()
 		hopRetryCount = 0
 		hopServer()
 
