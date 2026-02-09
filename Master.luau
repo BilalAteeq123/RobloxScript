@@ -26,8 +26,10 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
+local AUTO_ENABLED
+
 -- =========================
--- SAFE SHUTDOWN SYSTEM (EXECUTOR STABILITY)
+-- SAFE SHUTDOWN SYSTEM (HOP-SAFE)
 -- =========================
 
 if _G.TRAVEL_SCRIPT_RUNNING then
@@ -38,6 +40,12 @@ _G.TRAVEL_SCRIPT_RUNNING = true
 local SCRIPT_SHUTTING_DOWN = false
 local CONNECTIONS = {}
 
+local LOOP_GEN = 0
+local HOP_IN_PROGRESS = false
+
+local startTokenWatcherLoop
+local startAutoCycleLoop
+
 local function track(conn)
 	if conn then
 		table.insert(CONNECTIONS, conn)
@@ -45,32 +53,51 @@ local function track(conn)
 	return conn
 end
 
+-- Call this right before you start a server hop.
+-- It stops loops, but DOES NOT clear _G.TRAVEL_SCRIPT_RUNNING yet.
 local function shutdownScript()
 	if SCRIPT_SHUTTING_DOWN then
 		return
 	end
+
 	SCRIPT_SHUTTING_DOWN = true
+	LOOP_GEN = LOOP_GEN + 1
+	HOP_IN_PROGRESS = true
 
 	AUTO_ENABLED = false
 
-	for _, c in ipairs(CONNECTIONS) do
-		pcall(function()
-			c:Disconnect()
-		end)
+	task.wait(0.25)
+end
+
+-- If teleport FAILS, bring the script back to life in the SAME server.
+local function resumeAfterHopFailed()
+	if not HOP_IN_PROGRESS then
+		return
 	end
 
-	CONNECTIONS = {}
+	HOP_IN_PROGRESS = false
+	SCRIPT_SHUTTING_DOWN = false
 
-	task.wait(0.25) -- critical: lets executor detach teleport hooks
+	if type(startTokenWatcherLoop) == "function" then
+		startTokenWatcherLoop()
+	end
+	if type(startAutoCycleLoop) == "function" then
+		startAutoCycleLoop()
+	end
+end
 
+-- Only when teleport ACTUALLY starts, allow the script to run again in the next server.
+local function markTeleportStarted()
 	_G.TRAVEL_SCRIPT_RUNNING = false
 end
+
 
 local player = Players.LocalPlayer
 if not player then
 	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
 	player = Players.LocalPlayer
 end
+
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
@@ -103,7 +130,7 @@ local TRAVELLING_MERCHANT_KEYWORDS = {
 -- AUTO CYCLE SETTINGS
 -- =========================
 
-local AUTO_ENABLED = false
+AUTO_ENABLED = false
 
 local AUTO_DO_TOKENS = true
 local AUTO_DO_MERCHANT = true
@@ -1196,16 +1223,21 @@ local function watchParkourTimer(tokenName, timerName)
 	onChanged()
 end
 
-task.spawn(function()
-	while not SCRIPT_SHUTTING_DOWN do
-		for _, info in ipairs(WATCHED_TOKENS) do
-			if timerConnections[info.timerName] ~= "no_label" then
-				watchParkourTimer(info.tokenName, info.timerName)
+startTokenWatcherLoop = function()
+	local myGen = LOOP_GEN
+	task.spawn(function()
+		while (not SCRIPT_SHUTTING_DOWN) and (myGen == LOOP_GEN) do
+			for _, info in ipairs(WATCHED_TOKENS) do
+				if timerConnections[info.timerName] ~= "no_label" then
+					watchParkourTimer(info.tokenName, info.timerName)
+				end
 			end
+			task.wait(1)
 		end
-		task.wait(1)
-	end
-end)
+	end)
+end
+
+startTokenWatcherLoop()
 
 -- =========================
 -- FULL AUTO CYCLE (ORDER YOU REQUESTED)
@@ -1292,19 +1324,23 @@ local function runFullAutoCycleOnce()
 	end
 end
 
-task.spawn(function()
-	while not SCRIPT_SHUTTING_DOWN do
-		if AUTO_ENABLED then
-			local now = os.clock()
-			if (now - lastAutoCycleAt) >= AUTO_CYCLE_COOLDOWN then
-				lastAutoCycleAt = now
-				pcall(runFullAutoCycleOnce)
+startAutoCycleLoop = function()
+	local myGen = LOOP_GEN
+	task.spawn(function()
+		while (not SCRIPT_SHUTTING_DOWN) and (myGen == LOOP_GEN) do
+			if AUTO_ENABLED then
+				local now = os.clock()
+				if (now - lastAutoCycleAt) >= AUTO_CYCLE_COOLDOWN then
+					lastAutoCycleAt = now
+					pcall(runFullAutoCycleOnce)
+				end
 			end
+			task.wait(AUTO_LOOP_DELAY)
 		end
-		task.wait(AUTO_LOOP_DELAY)
-	end
-end)
+	end)
+end
 
+startAutoCycleLoop()
 -- =========================
 -- SERVER HOP LOGIC (MANUAL KEY)
 -- (EXACT LOGIC FROM YOUR WORKING SCRIPT)
@@ -1366,17 +1402,20 @@ track(TeleportService.TeleportInitFailed:Connect(function(p, result, err)
 		err = err,
 		serverId = currentAttemptServerId
 	}
+	resumeAfterHopFailed()
 end)
 
-track(player.OnTeleport:Connect(function(state)
+track(player.OnTeleport:Connect(function(state, ...)
 	-- If we reach "Started", Roblox is taking over and this hop "succeeded" (we'll leave the server)
 	if state == Enum.TeleportState.Started then
+		markTeleportStarted()
+
 		teleportOutcome = "started"
 		teleportOutcomeData = {
 			serverId = currentAttemptServerId
 		}
 	end
-end)
+end))
 
 local function isOnCooldown(serverId)
 	local lastVisit = visitedServers[serverId]
