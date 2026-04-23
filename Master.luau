@@ -25,8 +25,82 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local RunService = game:GetService("RunService")
 
 local AUTO_ENABLED
+
+-- =========================
+-- DEBUG / CONSOLE LOGGING
+-- =========================
+
+local LOG_GUI_INTERACTIONS = true
+local LOG_GUI_VISIBILITY = true
+local LOG_GUI_TEXT_CHANGES = false
+local LOG_TELEPORTS = true
+local LOG_POSITION_JUMPS = true
+local LOG_PURCHASES = true
+local LOG_PROXIMITY = true
+
+local TELEPORT_JUMP_DISTANCE = 40
+
+local OBSERVED_GUI = setmetatable({}, { __mode = "k" })
+
+local function dbg(tag, ...)
+	print("[TRAVEL DEBUG][" .. tostring(tag) .. "]", ...)
+end
+
+local function safeName(obj)
+	if not obj then
+		return "nil"
+	end
+
+	local ok, full = pcall(function()
+		return obj:GetFullName()
+	end)
+
+	if ok and full then
+		return full
+	end
+
+	return tostring(obj.Name or obj)
+end
+
+local function getGuiText(obj)
+	if not obj then
+		return ""
+	end
+
+	local ok, text = pcall(function()
+		return obj.Text
+	end)
+
+	if ok and type(text) == "string" then
+		text = text:gsub("%s+", " ")
+		if #text > 80 then
+			text = text:sub(1, 77) .. "..."
+		end
+		return text
+	end
+
+	return ""
+end
+
+local function fmtVec3(v)
+	if typeof(v) ~= "Vector3" then
+		return tostring(v)
+	end
+	return string.format("(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
+end
+
+local function logTeleport(reason, fromPos, toPos)
+	if not LOG_TELEPORTS then
+		return
+	end
+
+	dbg("TELEPORT", tostring(reason or "unknown"), "FROM", fmtVec3(fromPos), "TO", fmtVec3(toPos))
+end
 
 -- =========================
 -- SAFE SHUTDOWN SYSTEM (HOP-SAFE)
@@ -51,6 +125,18 @@ local function track(conn)
 		table.insert(CONNECTIONS, conn)
 	end
 	return conn
+end
+
+local function connectSignalIfExists(obj, signalName, callback)
+	local ok, signal = pcall(function()
+		return obj[signalName]
+	end)
+
+	if ok and typeof(signal) == "RBXScriptSignal" then
+		return track(signal:Connect(callback))
+	end
+
+	return nil
 end
 
 -- Call this right before you start a server hop.
@@ -84,6 +170,8 @@ local function resumeAfterHopFailed()
 	if type(startAutoCycleLoop) == "function" then
 		startAutoCycleLoop()
 	end
+
+	startPositionJumpWatcher()
 end
 
 -- Only when teleport ACTUALLY starts, allow the script to run again in the next server.
@@ -531,6 +619,197 @@ local function strContainsAny(haystack, needles)
 end
 
 -- =========================
+-- GUI OBSERVER
+-- =========================
+
+local function observeGuiInstance(inst)
+	if not LOG_GUI_INTERACTIONS then
+		return
+	end
+
+	if not inst or OBSERVED_GUI[inst] then
+		return
+	end
+	OBSERVED_GUI[inst] = true
+
+	if inst:IsA("ScreenGui") then
+		connectSignalIfExists(inst, "Enabled", function()
+			dbg("GUI", "ScreenGui Enabled changed:", safeName(inst), "=>", tostring(inst.Enabled))
+		end)
+	end
+
+	if inst:IsA("GuiObject") and LOG_GUI_VISIBILITY then
+		track(inst:GetPropertyChangedSignal("Visible"):Connect(function()
+			dbg("GUI", "Visible changed:", safeName(inst), "=>", tostring(inst.Visible))
+		end))
+	end
+
+	if inst:IsA("GuiButton") then
+		connectSignalIfExists(inst, "Activated", function()
+			dbg("GUI CLICK", safeName(inst), "TEXT:", getGuiText(inst))
+		end)
+
+		connectSignalIfExists(inst, "MouseButton1Click", function()
+			dbg("GUI CLICK", safeName(inst), "TEXT:", getGuiText(inst))
+		end)
+	end
+
+	if inst:IsA("TextBox") then
+		connectSignalIfExists(inst, "Focused", function()
+			dbg("GUI", "TextBox Focused:", safeName(inst), "TEXT:", getGuiText(inst))
+		end)
+
+		connectSignalIfExists(inst, "FocusLost", function(enterPressed)
+			dbg("GUI", "TextBox FocusLost:", safeName(inst), "ENTER:", tostring(enterPressed), "TEXT:", getGuiText(inst))
+		end)
+	end
+
+	if LOG_GUI_TEXT_CHANGES and (inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")) then
+		track(inst:GetPropertyChangedSignal("Text"):Connect(function()
+			dbg("GUI TEXT", safeName(inst), "=>", getGuiText(inst))
+		end))
+	end
+end
+
+local function startGuiObserver()
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then
+		playerGui = player:WaitForChild("PlayerGui")
+	end
+
+	for _, inst in ipairs(playerGui:GetDescendants()) do
+		observeGuiInstance(inst)
+	end
+
+	track(playerGui.DescendantAdded:Connect(function(inst)
+		observeGuiInstance(inst)
+
+		if inst:IsA("ScreenGui") or inst:IsA("Frame") or inst:IsA("GuiButton") then
+			dbg("GUI", "Added:", safeName(inst))
+		end
+	end))
+
+	track(playerGui.DescendantRemoving:Connect(function(inst)
+		if inst:IsA("ScreenGui") or inst:IsA("Frame") or inst:IsA("GuiButton") then
+			dbg("GUI", "Removed:", safeName(inst))
+		end
+	end))
+end
+
+-- =========================
+-- PURCHASE / PROMPT OBSERVER
+-- =========================
+
+local function startPurchaseObserver()
+	if not LOG_PURCHASES then
+		return
+	end
+
+	connectSignalIfExists(MarketplaceService, "PromptGamePassPurchaseFinished", function(p, gamePassId, wasPurchased)
+		if p == player then
+			dbg("PURCHASE", "GamePass finished:", tostring(gamePassId), "PURCHASED:", tostring(wasPurchased))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptProductPurchaseFinished", function(userId, productId, wasPurchased)
+		if userId == player.UserId then
+			dbg("PURCHASE", "Developer product finished:", tostring(productId), "PURCHASED:", tostring(wasPurchased))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptPurchaseFinished", function(p, assetId, wasPurchased)
+		if p == player then
+			dbg("PURCHASE", "Asset purchase finished:", tostring(assetId), "PURCHASED:", tostring(wasPurchased))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptBundlePurchaseFinished", function(p, bundleId, wasPurchased)
+		if p == player then
+			dbg("PURCHASE", "Bundle purchase finished:", tostring(bundleId), "PURCHASED:", tostring(wasPurchased))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptGamePassPurchaseRequested", function(p, gamePassId)
+		if p == player then
+			dbg("PURCHASE", "GamePass prompt requested:", tostring(gamePassId))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptProductPurchaseRequested", function(userId, productId)
+		if userId == player.UserId then
+			dbg("PURCHASE", "Developer product prompt requested:", tostring(productId))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptPurchaseRequested", function(p, assetId)
+		if p == player then
+			dbg("PURCHASE", "Asset prompt requested:", tostring(assetId))
+		end
+	end)
+
+	connectSignalIfExists(MarketplaceService, "PromptBundlePurchaseRequested", function(p, bundleId)
+		if p == player then
+			dbg("PURCHASE", "Bundle prompt requested:", tostring(bundleId))
+		end
+	end)
+end
+
+local function startProximityObserver()
+	if not LOG_PROXIMITY then
+		return
+	end
+
+	connectSignalIfExists(ProximityPromptService, "PromptShown", function(prompt, inputType)
+		dbg("PROMPT", "Shown:", safeName(prompt), "ACTION:", tostring(prompt.ActionText), "OBJECT:", tostring(prompt.ObjectText), "INPUT:", tostring(inputType))
+	end)
+
+	connectSignalIfExists(ProximityPromptService, "PromptHidden", function(prompt)
+		dbg("PROMPT", "Hidden:", safeName(prompt), "ACTION:", tostring(prompt.ActionText), "OBJECT:", tostring(prompt.ObjectText))
+	end)
+
+	connectSignalIfExists(ProximityPromptService, "PromptTriggered", function(prompt, triggeringPlayer)
+		if triggeringPlayer == player then
+			dbg("PROMPT", "Triggered:", safeName(prompt), "ACTION:", tostring(prompt.ActionText), "OBJECT:", tostring(prompt.ObjectText))
+		end
+	end)
+end
+
+-- =========================
+-- POSITION JUMP WATCHER
+-- =========================
+
+local function startPositionJumpWatcher()
+	if not LOG_POSITION_JUMPS then
+		return
+	end
+
+	local myGen = LOOP_GEN
+	task.spawn(function()
+		local lastPos = nil
+
+		while (not SCRIPT_SHUTTING_DOWN) and (myGen == LOOP_GEN) do
+			ensureHumanoidRootPart()
+
+			local currentPos = humanoidRootPart.Position
+			if lastPos then
+				local dist = (currentPos - lastPos).Magnitude
+				if dist >= TELEPORT_JUMP_DISTANCE then
+					dbg("POSITION", "Large movement detected:", string.format("%.2f studs", dist), "FROM", fmtVec3(lastPos), "TO", fmtVec3(currentPos))
+				end
+			end
+
+			lastPos = currentPos
+			task.wait(0.2)
+		end
+	end)
+end
+
+
+startGuiObserver()
+startPurchaseObserver()
+startProximityObserver()
+startPositionJumpWatcher()
+-- =========================
 -- MERCHANT FIND + TELEPORT (REFERENCE POINT + RAYCAST)
 -- =========================
 
@@ -603,12 +882,16 @@ local function teleportNearModelOnGround(model, horizontalDistance)
 			result.Position.Y + standY + TOKEN_EXTRA_Y,
 			desiredXZ.Z
 		)
+		local fromPos = humanoidRootPart.Position
 		humanoidRootPart.CFrame = CFrame.new(finalPos)
+		logTeleport("teleportNearModelOnGround -> " .. tostring(model.Name), fromPos, finalPos)
 		return true
 	end
 
 	local fallbackPos = desiredXZ + Vector3.new(0, 6, 0)
+	local fromPos = humanoidRootPart.Position
 	humanoidRootPart.CFrame = CFrame.new(fallbackPos)
+	logTeleport("teleportNearModelOnGround fallback -> " .. tostring(model.Name), fromPos, fallbackPos)
 	return true
 end
 
@@ -625,6 +908,9 @@ local function getTravellingMerchantSelling()
 	end
 
 	local gui = playerGui:FindFirstChild("TravelMerchant")
+	if gui and LOG_GUI_INTERACTIONS then
+		dbg("GUI", "TravelMerchant GUI detected:", safeName(gui))
+	end
 	if not gui then
 		return sellingLines
 	end
@@ -714,14 +1000,17 @@ end
 local function teleportToTravellingMerchant()
 	local merchant = findTravellingMerchant()
 	if merchant then
+		dbg("MERCHANT", "Found merchant:", safeName(merchant))
 		local ok = teleportNearModelOnGround(merchant, 10)
 		if not ok then
 			print("no merchant")
+			dbg("MERCHANT", "Teleport near merchant failed:", safeName(merchant))
 			return
 		end
 		printTravellingMerchantShop()
 	else
 		print("no merchant")
+		dbg("MERCHANT", "No travelling merchant found")
 	end
 end
 
@@ -1122,7 +1411,10 @@ local function teleportOnTopOfToken(tokenInstance)
 		+ (humanoidRootPart.Size.Y * 0.5)
 		+ TOKEN_EXTRA_Y
 
-	humanoidRootPart.CFrame = CFrame.new(part.Position.X, y, part.Position.Z)
+	local fromPos = humanoidRootPart.Position
+	local toPos = Vector3.new(part.Position.X, y, part.Position.Z)
+	humanoidRootPart.CFrame = CFrame.new(toPos)
+	logTeleport("teleportOnTopOfToken -> " .. tostring(tokenInstance.Name), fromPos, toPos)
 end
 
 local function findWorldTokenByName(tokenName)
@@ -1140,13 +1432,19 @@ local function teleportToBothSpawnedTravelTokens()
 	local token2 = findWorldTokenByName("TravelToken2")
 
 	if token1 then
+		dbg("TOKEN", "Teleporting to TravelToken1:", safeName(token1))
 		teleportOnTopOfToken(token1)
+	else
+		dbg("TOKEN", "TravelToken1 not found")
 	end
 
 	task.wait(1)
 
 	if token2 then
+		dbg("TOKEN", "Teleporting to TravelToken2:", safeName(token2))
 		teleportOnTopOfToken(token2)
+	else
+		dbg("TOKEN", "TravelToken2 not found")
 	end
 end
 
@@ -1214,7 +1512,10 @@ local function watchParkourTimer(tokenName, timerName)
 
 			local token = findWorldTokenByName(tokenName)
 			if token then
+				dbg("TOKEN TIMER", timerName, "reached zero, teleporting to", tokenName)
 				teleportOnTopOfToken(token)
+			else
+				dbg("TOKEN TIMER", timerName, "reached zero but token was not found:", tokenName)
 			end
 		end
 	end
@@ -1407,6 +1708,7 @@ end)
 
 track(player.OnTeleport:Connect(function(state, ...)
 	-- If we reach "Started", Roblox is taking over and this hop "succeeded" (we'll leave the server)
+	dbg("ON TELEPORT", "State:", tostring(state), "TargetServer:", tostring(currentAttemptServerId))
 	if state == Enum.TeleportState.Started then
 		markTeleportStarted()
 
@@ -1459,6 +1761,7 @@ local function attemptTeleport(serverId)
 	teleportOutcome = nil
 	teleportOutcomeData = nil
 
+	dbg("SERVER HOP", "Attempting TeleportToPlaceInstance:", tostring(serverId))
 	local ok, callErr = pcall(function()
 		TeleportService:TeleportToPlaceInstance(placeId, serverId, player)
 	end)
@@ -1474,22 +1777,25 @@ local function attemptTeleport(serverId)
 
 	-- If teleport started, we're done (Roblox will move us)
 	if outcome == "started" then
+		dbg("SERVER HOP", "Teleport started successfully:", tostring(serverId))
 		return true, "started"
 	end
 
 	-- If we got a failure, decide what to do
 	if outcome == "failed" then
 		if data and isGameFullResult(data.result) then
-			-- Mark as visited for a short time so we don't immediately try it again
+			dbg("SERVER HOP", "Server full:", tostring(serverId))
 			visitedServers[serverId] = os.time() - (SERVER_COOLDOWN - FULL_SERVER_COOLDOWN)
 			return false, "full"
 		end
 		-- Other failures: still skip this server for normal cooldown to avoid loops
+		dbg("SERVER HOP", "Teleport failed:", tostring(serverId), tostring(data and data.result), tostring(data and data.err))
 		visitedServers[serverId] = os.time()
 		return false, "failed"
 	end
 
 	-- No signal: treat as inconclusive; skip briefly to avoid hammering the same server
+	dbg("SERVER HOP", "Teleport timeout/inconclusive:", tostring(serverId))
 	visitedServers[serverId] = os.time() - (SERVER_COOLDOWN - FULL_SERVER_COOLDOWN)
 	return false, "timeout"
 end
